@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Marge — The AI Church Secretary Every Pastor Needs</title>
+<meta name="description" content="Marge is the AI church secretary you can't afford to hire — she briefs you every morning on who needs care today, drafts your follow-up messages, and makes sure no one falls through the cracks.">
+<meta property="og:title" content="Marge — The AI Church Secretary Every Pastor Needs">
+<meta property="og:description" content="She briefs you every morning. She drafts the texts. She remembers who you haven't called. Built by a pastor, for pastors.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --cream: #FAF7F2;
+    --warm-white: #FDFBF8;
+    --sage: #5C7A5F;
+    --sage-light: #7A9B7D;
+    --sage-muted: #EAF0EA;
+    --gold: #B08C4A;
+    --gold-light: #C9A560;
+    --charcoal: #2C2C2C;
+    --text: #3D3D3D;
+    --muted: #7A7065;
+    --border: rgba(176,140,74,0.2);
+    --card-bg: rgba(255,255,255,0.7);
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: var(--cream);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Subtle texture overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23b08c4a' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.5;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ---- Header ---- */
+  header {
+    padding: 36px 0 0;
+    animation: fadeDown 0.5s ease both;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+  }
+
+  .logo-icon {
+    width: 36px;
+    height: 36px;
+    background: var(--sage);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .logo-icon svg {
+    width: 20px;
+    height: 20px;
+    fill: white;
+  }
+
+  .logo-text {
+    font-family: 'Lora', serif;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--charcoal);
+    letter-spacing: -0.01em;
+  }
+
+  .logo-badge {
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--sage);
+    background: var(--sage-muted);
+    padding: 2px 8px;
+    border-radius: 20px;
+    margin-left: 4px;
+  }
+
+  /* ---- Hero ---- */
+  .hero {
+    padding: 80px 0 60px;
+    animation: fadeUp 0.6s ease 0.1s both;
+  }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--gold);
+    margin-bottom: 24px;
+  }
+
+  .eyebrow::before {
+    content: '';
+    display: inline-block;
+    width: 28px;
+    height: 1px;
+    background: var(--gold);
+  }
+
+  h1 {
+    font-family: 'Lora', serif;
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    line-height: 1.2;
+    color: var(--charcoal);
+    margin-bottom: 24px;
+    letter-spacing: -0.02em;
+  }
+
+  h1 em {
+    font-style: italic;
+    color: var(--sage);
+  }
+
+  .hero-sub {
+    font-size: 1.1rem;
+    line-height: 1.75;
+    color: var(--muted);
+    max-width: 580px;
+    margin-bottom: 40px;
+  }
+
+  /* ---- Briefing mockup ---- */
+  .briefing-card {
+    background: var(--card-bg);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px;
+    margin-bottom: 48px;
+    box-shadow: 0 4px 24px rgba(44,44,44,0.06), 0 1px 4px rgba(44,44,44,0.04);
+    animation: fadeUp 0.6s ease 0.2s both;
+  }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .card-avatar {
+    width: 32px;
+    height: 32px;
+    background: var(--sage);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .card-avatar svg {
+    width: 16px;
+    height: 16px;
+    fill: white;
+  }
+
+  .card-sender {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--charcoal);
+  }
+
+  .card-time {
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-left: auto;
+  }
+
+  .briefing-greeting {
+    font-family: 'Lora', serif;
+    font-size: 0.95rem;
+    color: var(--charcoal);
+    margin-bottom: 18px;
+    line-height: 1.6;
+  }
+
+  .briefing-section {
+    margin-bottom: 14px;
+  }
+
+  .briefing-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--gold);
+    margin-bottom: 6px;
+  }
+
+  .briefing-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 0.88rem;
+    line-height: 1.6;
+    color: var(--text);
+    background: var(--sage-muted);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 6px;
+  }
+
+  .briefing-item-icon {
+    font-size: 1rem;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .briefing-action {
+    display: inline-block;
+    font-size: 0.76rem;
+    font-weight: 600;
+    color: var(--sage);
+    background: white;
+    border: 1px solid var(--sage-light);
+    border-radius: 20px;
+    padding: 3px 10px;
+    margin-top: 6px;
+    cursor: default;
+  }
+
+  /* ---- Email capture ---- */
+  .capture-section {
+    animation: fadeUp 0.6s ease 0.3s both;
+  }
+
+  .capture-label {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+
+  .capture-form {
+    display: flex;
+    gap: 10px;
+    max-width: 480px;
+  }
+
+  .capture-form input {
+    flex: 1;
+    padding: 14px 18px;
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    font-size: 0.95rem;
+    font-family: 'Inter', sans-serif;
+    background: white;
+    color: var(--charcoal);
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .capture-form input:focus {
+    border-color: var(--sage-light);
+  }
+
+  .capture-form input::placeholder {
+    color: #B8AFA5;
+  }
+
+  .capture-form button {
+    padding: 14px 24px;
+    background: var(--sage);
+    color: white;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.95rem;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s;
+    white-space: nowrap;
+  }
+
+  .capture-form button:hover {
+    background: var(--sage-light);
+  }
+
+  .capture-form button:active {
+    transform: scale(0.98);
+  }
+
+  .capture-form button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .success-msg {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.92rem;
+    color: var(--sage);
+    font-weight: 500;
+    padding: 14px 18px;
+    background: var(--sage-muted);
+    border-radius: 10px;
+    max-width: 480px;
+  }
+
+  .success-msg.show { display: flex; }
+
+  .privacy-note {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-top: 10px;
+  }
+
+  /* ---- Divider ---- */
+  .divider {
+    margin: 64px 0;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ---- Features ---- */
+  .features-heading {
+    font-family: 'Lora', serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--charcoal);
+    margin-bottom: 8px;
+  }
+
+  .features-sub {
+    font-size: 0.95rem;
+    color: var(--muted);
+    margin-bottom: 36px;
+    line-height: 1.6;
+  }
+
+  .features-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 64px;
+  }
+
+  @media (max-width: 540px) {
+    .features-grid { grid-template-columns: 1fr; }
+    .capture-form { flex-direction: column; }
+    .capture-form button { width: 100%; }
+  }
+
+  .feature-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    transition: box-shadow 0.2s;
+  }
+
+  .feature-card:hover {
+    box-shadow: 0 4px 16px rgba(44,44,44,0.06);
+  }
+
+  .feature-icon {
+    font-size: 1.5rem;
+    margin-bottom: 12px;
+  }
+
+  .feature-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--charcoal);
+    margin-bottom: 6px;
+  }
+
+  .feature-desc {
+    font-size: 0.84rem;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  /* ---- From Nathan ---- */
+  .nathan-section {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 36px;
+    margin-bottom: 64px;
+    position: relative;
+  }
+
+  .nathan-quote {
+    font-family: 'Lora', serif;
+    font-size: 1.15rem;
+    font-style: italic;
+    line-height: 1.8;
+    color: var(--charcoal);
+    margin-bottom: 24px;
+  }
+
+  .nathan-attr {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .nathan-avatar {
+    width: 44px;
+    height: 44px;
+    background: var(--gold);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Lora', serif;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+  }
+
+  .nathan-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--charcoal);
+  }
+
+  .nathan-role {
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+
+  /* ---- Pricing hint ---- */
+  .pricing-hint {
+    text-align: center;
+    padding: 48px 0 64px;
+    border-top: 1px solid var(--border);
+  }
+
+  .price-badge {
+    display: inline-block;
+    font-family: 'Lora', serif;
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: var(--sage);
+    margin-bottom: 8px;
+  }
+
+  .price-sub {
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin-bottom: 24px;
+    line-height: 1.6;
+  }
+
+  /* ---- Footer ---- */
+  footer {
+    padding: 32px 0 40px;
+    border-top: 1px solid var(--border);
+  }
+
+  .footer-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+
+  .footer-copy {
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+
+  .footer-link {
+    font-size: 0.8rem;
+    color: var(--muted);
+    text-decoration: none;
+  }
+
+  .footer-link:hover { color: var(--sage); }
+
+  /* ---- Animations ---- */
+  @keyframes fadeDown {
+    from { opacity: 0; transform: translateY(-12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Header -->
+  <header>
+    <a href="/" class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+        </svg>
+      </div>
+      <span class="logo-text">Marge</span>
+      <span class="logo-badge">Coming Soon</span>
+    </a>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="eyebrow">For Solo Pastors &amp; Small Churches</div>
+
+    <h1>The church secretary<br>you <em>can't afford</em> to hire.</h1>
+
+    <p class="hero-sub">
+      Every morning, Marge briefs you on who needs care today — who had surgery, who hasn't been in three weeks, who's waiting for a follow-up you meant to send. She drafts the messages. You just show up for your people.
+    </p>
+
+    <!-- Briefing mockup -->
+    <div class="briefing-card">
+      <div class="card-header">
+        <div class="card-avatar">
+          <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
+          </svg>
+        </div>
+        <div>
+          <div class="card-sender">Marge · Morning Briefing</div>
+        </div>
+        <div class="card-time">7:00 AM</div>
+      </div>
+
+      <div class="briefing-greeting">
+        Good morning, Pastor Nathan. Here are your people for today.
+      </div>
+
+      <div class="briefing-section">
+        <div class="briefing-label">🏥 Care Needs</div>
+        <div class="briefing-item">
+          <span class="briefing-item-icon">•</span>
+          <div>
+            <strong>Martha Ellis</strong> — hip surgery 5 days ago. No follow-up logged yet.
+            <br><span class="briefing-action">Draft a check-in message →</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="briefing-section">
+        <div class="briefing-label">👋 Visitor Follow-Up</div>
+        <div class="briefing-item">
+          <span class="briefing-item-icon">•</span>
+          <div>
+            <strong>James &amp; Carla Whitmore</strong> — visited 2 Sundays ago with two kids. No contact made.
+            <br><span class="briefing-action">Draft welcome text →</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="briefing-section">
+        <div class="briefing-label">💭 Today's Nudge</div>
+        <div class="briefing-item">
+          <span class="briefing-item-icon">•</span>
+          <div>You haven't connected with <strong>Sarah Okonkwo</strong> since she mentioned her husband lost his job on March 8th. A short text today would mean a lot.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Email capture -->
+    <div class="capture-section">
+      <p class="capture-label">Be first to know when Marge is ready. No spam — ever.</p>
+      <form class="capture-form" id="waitlist-form">
+        <input type="email" id="email-input" placeholder="your@email.com" required autocomplete="email">
+        <button type="submit" id="submit-btn">Join the Waitlist</button>
+      </form>
+      <div class="success-msg" id="success-msg">
+        <span>🙏</span>
+        <span>You're on the list. Marge will be in touch when she's ready.</span>
+      </div>
+      <p class="privacy-note">Your email is safe with us. Unsubscribe anytime.</p>
+    </div>
+  </section>
+
+  <div class="divider"></div>
+
+  <!-- Features -->
+  <section>
+    <h2 class="features-heading">What Marge does for you</h2>
+    <p class="features-sub">Pastoral care is not an information problem. It's a movement problem. Marge doesn't store data — she acts on it.</p>
+
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">☀️</div>
+        <div class="feature-title">Daily Morning Briefing</div>
+        <div class="feature-desc">Every morning at 7 AM, Marge briefs you on exactly who needs care today — birthdays, care cases, visitors, absentees, prayer follow-ups.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✍️</div>
+        <div class="feature-title">Outreach Drafts in Your Voice</div>
+        <div class="feature-desc">One tap and Marge drafts the text or email in your voice. Warm. Personal. Ready to send. Trained on how you actually write.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">👋</div>
+        <div class="feature-title">First-Time Visitor Sequences</div>
+        <div class="feature-desc">Marge catches every first-time visitor and builds a follow-up sequence automatically — so no one visits twice without hearing from you.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🏥</div>
+        <div class="feature-title">Care &amp; Crisis Tracker</div>
+        <div class="feature-desc">Hospital visits, family crises, counseling — all tracked in one place. Marge surfaces them when the timer is up and you're overdue.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🙏</div>
+        <div class="feature-title">Prayer Request Management</div>
+        <div class="feature-desc">Intake via email, text, or in-app. Marge tracks every request, flags ones that need a follow-up, and auto-generates the weekly prayer list.</div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📡</div>
+        <div class="feature-title">Absence Detection</div>
+        <div class="feature-desc">The Hendersons haven't been in six weeks. Marge notices before you do and puts them in your briefing with a draft check-in message.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- From Nathan -->
+  <div class="nathan-section">
+    <p class="nathan-quote">
+      "I built Marge because I kept failing people I cared about — not from lack of love, but lack of memory. The church secretary I couldn't afford was the only system that ever worked. Marge is her."
+    </p>
+    <div class="nathan-attr">
+      <div class="nathan-avatar">N</div>
+      <div>
+        <div class="nathan-name">Pastor Nathan Parikh</div>
+        <div class="nathan-role">Hallmark Church, Fort Worth TX · Builder of Marge</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pricing hint -->
+  <div class="pricing-hint">
+    <div class="price-badge">$29 / month</div>
+    <p class="price-sub">
+      Less than one hour of part-time admin labor — for a full-time memory that never sleeps.<br>
+      30-day free trial. No credit card required.
+    </p>
+    <form class="capture-form" id="waitlist-form-2" style="margin: 0 auto; justify-content: center;">
+      <input type="email" id="email-input-2" placeholder="your@email.com" required autocomplete="email">
+      <button type="submit" id="submit-btn-2">Join the Waitlist</button>
+    </form>
+    <div class="success-msg" id="success-msg-2" style="margin: 10px auto 0; justify-content: center;">
+      <span>🙏</span>
+      <span>You're on the list. Marge will be in touch.</span>
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <span class="footer-copy">© 2026 Nathan Parikh. Built for pastors who actually love their people.</span>
+      <a href="mailto:nathan@happywp.co" class="footer-link">Contact</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  async function submitEmail(email, formEl, btnEl, successEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = 'Adding you...';
+    try {
+      const res = await fetch('/api/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, product: 'Marge' })
+      });
+      if (res.ok) {
+        formEl.style.display = 'none';
+        successEl.classList.add('show');
+      } else {
+        btnEl.disabled = false;
+        btnEl.textContent = 'Join the Waitlist';
+        alert('Something went wrong. Please try again.');
+      }
+    } catch (e) {
+      btnEl.disabled = false;
+      btnEl.textContent = 'Join the Waitlist';
+      alert('Something went wrong. Please try again.');
+    }
+  }
+
+  document.getElementById('waitlist-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    submitEmail(
+      document.getElementById('email-input').value,
+      this,
+      document.getElementById('submit-btn'),
+      document.getElementById('success-msg')
+    );
+  });
+
+  document.getElementById('waitlist-form-2').addEventListener('submit', function(e) {
+    e.preventDefault();
+    submitEmail(
+      document.getElementById('email-input-2').value,
+      this,
+      document.getElementById('submit-btn-2'),
+      document.getElementById('success-msg-2')
+    );
+  });
+</script>
+
+</body>
+</html>
