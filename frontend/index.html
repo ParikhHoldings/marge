@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Marge Morning Briefing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:wght@500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --cream: #FAF7F2;
+      --sage: #5C7A5F;
+      --gold: #B08C4A;
+      --charcoal: #2C2C2C;
+      --card: #fffdf9;
+      --border: rgba(92, 122, 95, 0.12);
+      --shadow: 0 14px 34px rgba(44, 44, 44, 0.08);
+      --soft-shadow: 0 8px 22px rgba(176, 140, 74, 0.10);
+      --muted: #6E6A63;
+      --accent-bg: rgba(176, 140, 74, 0.10);
+      --sage-bg: rgba(92, 122, 95, 0.10);
+      --radius-lg: 24px;
+      --radius-md: 18px;
+      --radius-sm: 12px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(176, 140, 74, 0.12), transparent 28%),
+        radial-gradient(circle at top right, rgba(92, 122, 95, 0.10), transparent 22%),
+        var(--cream);
+      color: var(--charcoal);
+    }
+
+    .page {
+      width: min(1100px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0 72px;
+    }
+
+    .hero {
+      background: linear-gradient(145deg, rgba(255, 253, 249, 0.98), rgba(255, 250, 241, 0.94));
+      border: 1px solid rgba(176, 140, 74, 0.16);
+      border-radius: 32px;
+      box-shadow: var(--shadow);
+      padding: 36px 32px;
+      margin-bottom: 28px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -60px -60px auto;
+      width: 180px;
+      height: 180px;
+      background: radial-gradient(circle, rgba(92, 122, 95, 0.12), transparent 70%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      color: var(--sage);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.76rem;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+
+    h1, h2, h3 {
+      font-family: 'Lora', serif;
+      margin: 0;
+      color: var(--charcoal);
+    }
+
+    h1 {
+      font-size: clamp(2rem, 3vw, 3.2rem);
+      line-height: 1.12;
+      max-width: 12ch;
+    }
+
+    .subhead {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 1rem;
+      max-width: 62ch;
+      line-height: 1.7;
+    }
+
+    .cards {
+      display: grid;
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--card);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      box-shadow: var(--shadow);
+      border: 1px solid var(--border);
+    }
+
+    .card-title {
+      font-size: 1.4rem;
+      margin-bottom: 6px;
+    }
+
+    .card-description {
+      color: var(--muted);
+      font-size: 0.98rem;
+      margin-bottom: 18px;
+      line-height: 1.6;
+    }
+
+    .list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 18px;
+      border-radius: var(--radius-md);
+      background: linear-gradient(180deg, rgba(250, 247, 242, 0.92), rgba(255, 255, 255, 0.98));
+      border: 1px solid rgba(92, 122, 95, 0.10);
+    }
+
+    .row-main {
+      min-width: 0;
+    }
+
+    .row-main strong {
+      display: block;
+      font-size: 1rem;
+      margin-bottom: 4px;
+    }
+
+    .context {
+      color: var(--muted);
+      line-height: 1.55;
+      font-size: 0.95rem;
+    }
+
+    .draft-btn {
+      border: none;
+      background: var(--sage);
+      color: white;
+      padding: 11px 16px;
+      border-radius: 999px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: var(--soft-shadow);
+      transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
+      white-space: nowrap;
+      margin-top: 2px;
+    }
+
+    .draft-btn:hover,
+    .draft-btn:focus-visible {
+      background: #4d6a50;
+      transform: translateY(-1px);
+      outline: none;
+    }
+
+    .nudge {
+      background: linear-gradient(135deg, rgba(176, 140, 74, 0.13), rgba(255, 253, 249, 0.92));
+      border: 1px solid rgba(176, 140, 74, 0.18);
+      box-shadow: var(--soft-shadow);
+    }
+
+    .nudge-copy {
+      color: var(--charcoal);
+      font-size: 1.02rem;
+      line-height: 1.8;
+    }
+
+    .status {
+      text-align: center;
+      padding: 44px 24px;
+      color: var(--muted);
+      background: rgba(255, 253, 249, 0.82);
+      border: 1px dashed rgba(92, 122, 95, 0.22);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow);
+    }
+
+    .hidden { display: none !important; }
+
+    .skeleton-hero,
+    .skeleton-card,
+    .skeleton-line,
+    .skeleton-button {
+      position: relative;
+      overflow: hidden;
+      background: linear-gradient(90deg, rgba(255,255,255,0.45) 25%, rgba(255,255,255,0.82) 50%, rgba(255,255,255,0.45) 75%);
+      background-size: 200% 100%;
+      animation: pulse 1.8s ease-in-out infinite;
+    }
+
+    .skeleton-hero {
+      height: 220px;
+      border-radius: 32px;
+      margin-bottom: 28px;
+      background-color: rgba(92, 122, 95, 0.12);
+    }
+
+    .skeleton-card {
+      height: 190px;
+      border-radius: var(--radius-lg);
+      background-color: rgba(176, 140, 74, 0.10);
+    }
+
+    .skeleton-line {
+      height: 14px;
+      border-radius: 999px;
+      margin-bottom: 12px;
+      background-color: rgba(92, 122, 95, 0.12);
+    }
+
+    .skeleton-line.short { width: 34%; }
+    .skeleton-line.medium { width: 58%; }
+    .skeleton-line.long { width: 82%; }
+
+    .skeleton-button {
+      width: 112px;
+      height: 38px;
+      border-radius: 999px;
+      background-color: rgba(92, 122, 95, 0.16);
+      margin-left: auto;
+    }
+
+    .skeleton-layout {
+      display: grid;
+      gap: 20px;
+    }
+
+    .skeleton-inner {
+      padding: 24px;
+    }
+
+    @keyframes pulse {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    @media (max-width: 760px) {
+      .page { width: min(100% - 20px, 1100px); padding: 24px 0 48px; }
+      .hero, .card { padding: 20px; }
+      .row { flex-direction: column; }
+      .draft-btn { width: 100%; }
+      h1 { max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section id="loadingState" aria-live="polite">
+      <div class="skeleton-hero"></div>
+      <div class="skeleton-layout">
+        <div class="skeleton-card skeleton-inner">
+          <div class="skeleton-line short"></div>
+          <div class="skeleton-line long"></div>
+          <div class="skeleton-line medium"></div>
+          <div class="skeleton-button"></div>
+        </div>
+        <div class="skeleton-card skeleton-inner">
+          <div class="skeleton-line short"></div>
+          <div class="skeleton-line long"></div>
+          <div class="skeleton-line medium"></div>
+          <div class="skeleton-button"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="app" class="hidden">
+      <header class="hero">
+        <div class="eyebrow">Morning Briefing</div>
+        <h1 id="greeting">Good morning.</h1>
+        <p id="subhead" class="subhead"></p>
+      </header>
+      <section id="cards" class="cards"></section>
+    </section>
+
+    <div id="emptyState" class="status hidden">It looks like your flock is well-tended today, Pastor.</div>
+    <div id="errorState" class="status hidden">Marge had trouble connecting. Try refreshing in a moment.</div>
+  </main>
+
+  <script>
+    const API_URL = 'https://marge-staging-staging.up.railway.app/briefing/today';
+
+    const loadingState = document.getElementById('loadingState');
+    const app = document.getElementById('app');
+    const cards = document.getElementById('cards');
+    const greetingEl = document.getElementById('greeting');
+    const subheadEl = document.getElementById('subhead');
+    const emptyState = document.getElementById('emptyState');
+    const errorState = document.getElementById('errorState');
+
+    const formatDate = (value) => {
+      if (!value) return 'Date unavailable';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleDateString(undefined, {
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric'
+      });
+    };
+
+    const makeButton = () => {
+      const button = document.createElement('button');
+      button.className = 'draft-btn';
+      button.type = 'button';
+      button.textContent = 'Draft a text';
+      button.addEventListener('click', () => alert('Coming soon'));
+      return button;
+    };
+
+    const makeRow = (name, context) => {
+      const row = document.createElement('div');
+      row.className = 'row';
+
+      const main = document.createElement('div');
+      main.className = 'row-main';
+
+      const strong = document.createElement('strong');
+      strong.textContent = name;
+
+      const meta = document.createElement('div');
+      meta.className = 'context';
+      meta.textContent = context;
+
+      main.append(strong, meta);
+      row.append(main, makeButton());
+      return row;
+    };
+
+    const makeCard = (title, description, rows, extraClass = '') => {
+      const card = document.createElement('section');
+      card.className = `card ${extraClass}`.trim();
+
+      const heading = document.createElement('h2');
+      heading.className = 'card-title';
+      heading.textContent = title;
+
+      card.appendChild(heading);
+
+      if (description) {
+        const desc = document.createElement('p');
+        desc.className = 'card-description';
+        desc.textContent = description;
+        card.appendChild(desc);
+      }
+
+      const list = document.createElement('div');
+      list.className = 'list';
+      rows.forEach((row) => list.appendChild(row));
+      card.appendChild(list);
+      return card;
+    };
+
+    const makeNudgeCard = (nudges) => {
+      const card = document.createElement('section');
+      card.className = 'card nudge';
+
+      const heading = document.createElement('h2');
+      heading.className = 'card-title';
+      heading.textContent = "💭 Today's Nudge";
+
+      const copy = document.createElement('div');
+      copy.className = 'nudge-copy';
+      copy.textContent = nudges.join(' ');
+
+      card.append(heading, copy);
+      return card;
+    };
+
+    const hasItems = (value) => Array.isArray(value) && value.length > 0;
+
+    const renderBriefing = (data) => {
+      greetingEl.textContent = data.greeting || 'Good morning.';
+      const pastorName = data.pastor_name || 'Pastor';
+      const churchName = data.church_name ? ` at ${data.church_name}` : '';
+      subheadEl.textContent = `Here’s a gentle look at who may need care and follow-up today, ${pastorName}${churchName}.`;
+
+      const sections = [];
+      const celebrations = [
+        ...(data.birthdays_this_week || []).map((person) =>
+          makeRow(person.full_name, `Birthday on ${formatDate(person.birthday)}.`)
+        ),
+        ...(data.anniversaries_this_week || []).map((person) =>
+          makeRow(person.full_name, `Anniversary on ${formatDate(person.anniversary)}.`)
+        )
+      ];
+
+      if (celebrations.length) {
+        sections.push(makeCard(
+          '🎂 Birthdays & Anniversaries This Week',
+          'A few joyful moments worth remembering this week.',
+          celebrations
+        ));
+      }
+
+      if (hasItems(data.visitors_needing_followup)) {
+        sections.push(makeCard(
+          '👋 Visitors Needing Follow-Up',
+          'New faces may appreciate a warm word of welcome.',
+          data.visitors_needing_followup.map((visitor) =>
+            makeRow(visitor.full_name, `Visited on ${formatDate(visitor.visit_date)}. ${visitor.notes ? `Notes: ${visitor.notes}` : 'No additional notes.'}`)
+          )
+        ));
+      }
+
+      if (hasItems(data.active_care_cases)) {
+        sections.push(makeCard(
+          '🏥 Active Care Cases',
+          'Care needs already in motion that may merit a check-in.',
+          data.active_care_cases.map((person) => {
+            const details = [person.category, person.status, person.description, person.last_contact ? `Last contact ${formatDate(person.last_contact)}` : null]
+              .filter(Boolean)
+              .join(' • ');
+            return makeRow(person.member_name, details);
+          })
+        ));
+      }
+
+      if (hasItems(data.absent_members)) {
+        sections.push(makeCard(
+          '⏰ Members You Havent Seen in a While',
+          'A simple note can help someone feel remembered.',
+          data.absent_members.map((member) =>
+            makeRow(member.full_name, `Last attendance: ${formatDate(member.last_attendance)}.`)
+          )
+        ));
+      }
+
+      if (hasItems(data.unanswered_prayers)) {
+        sections.push(makeCard(
+          '🙏 Prayer Requests Needing an Update',
+          'Requests that may benefit from a fresh touchpoint.',
+          data.unanswered_prayers.map((prayer) =>
+            makeRow(prayer.submitted_by || 'Anonymous', `${prayer.request_text}${prayer.status ? ` • Status: ${prayer.status}` : ''}`)
+          )
+        ));
+      }
+
+      if (hasItems(data.nudges)) {
+        sections.push(makeNudgeCard(data.nudges));
+      }
+
+      cards.innerHTML = '';
+      sections.forEach((section) => cards.appendChild(section));
+
+      loadingState.classList.add('hidden');
+      errorState.classList.add('hidden');
+
+      if (sections.length === 0) {
+        emptyState.classList.remove('hidden');
+        app.classList.add('hidden');
+        return;
+      }
+
+      emptyState.classList.add('hidden');
+      app.classList.remove('hidden');
+    };
+
+    const showError = () => {
+      loadingState.classList.add('hidden');
+      app.classList.add('hidden');
+      emptyState.classList.add('hidden');
+      errorState.classList.remove('hidden');
+    };
+
+    fetch(API_URL, { headers: { Accept: 'application/json' } })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(renderBriefing)
+      .catch(showError);
+  </script>
+</body>
+</html>
