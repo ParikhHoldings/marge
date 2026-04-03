@@ -16,12 +16,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from app.database import init_db
 from app.routers import briefing, visitors, members, care
+from app.routers import chat
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,6 +72,14 @@ app.include_router(briefing.router)
 app.include_router(visitors.router)
 app.include_router(members.router)
 app.include_router(care.router)
+app.include_router(chat.router)
+
+# ── Static files (frontend) ───────────────────────────────────────────────────
+
+import os as _os
+_frontend_dir = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "frontend")
+if _os.path.isdir(_frontend_dir):
+    app.mount("/app", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
 
 
 # ── Root ──────────────────────────────────────────────────────────────────────
