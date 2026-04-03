@@ -23,6 +23,7 @@ load_dotenv()
 
 from app.database import init_db
 from app.routers import briefing, visitors, members, care
+from app.routers import chat
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +72,7 @@ app.include_router(briefing.router)
 app.include_router(visitors.router)
 app.include_router(members.router)
 app.include_router(care.router)
+app.include_router(chat.router)
 
 # ── Static files (frontend) ───────────────────────────────────────────────────
 
