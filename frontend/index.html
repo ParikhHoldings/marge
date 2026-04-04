@@ -3,23 +3,27 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Marge Morning Briefing</title>
+  <title>Marge Care Workspace</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:wght@500;600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --cream: #FAF7F2;
-      --sage: #5C7A5F;
-      --gold: #B08C4A;
-      --charcoal: #2C2C2C;
+      --cream: #faf7f2;
+      --sage: #5c7a5f;
+      --sage-deep: #4b6550;
+      --gold: #b08c4a;
+      --rose: #b86a5d;
+      --charcoal: #2c2c2c;
       --card: #fffdf9;
+      --card-soft: #fffaf2;
       --border: rgba(92, 122, 95, 0.12);
       --shadow: 0 14px 34px rgba(44, 44, 44, 0.08);
-      --soft-shadow: 0 8px 22px rgba(176, 140, 74, 0.10);
-      --muted: #6E6A63;
-      --accent-bg: rgba(176, 140, 74, 0.10);
-      --sage-bg: rgba(92, 122, 95, 0.10);
+      --soft-shadow: 0 8px 22px rgba(176, 140, 74, 0.1);
+      --muted: #6e6a63;
+      --accent-bg: rgba(176, 140, 74, 0.1);
+      --sage-bg: rgba(92, 122, 95, 0.1);
+      --rose-bg: rgba(184, 106, 93, 0.1);
       --radius-lg: 24px;
       --radius-md: 18px;
       --radius-sm: 12px;
@@ -36,10 +40,12 @@
       color: var(--charcoal);
     }
 
+    button, input, textarea { font: inherit; }
+
     .page {
-      width: min(1100px, calc(100% - 32px));
+      width: min(1160px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 48px 0 72px;
+      padding: 42px 0 72px;
     }
 
     .hero {
@@ -48,7 +54,7 @@
       border-radius: 32px;
       box-shadow: var(--shadow);
       padding: 36px 32px;
-      margin-bottom: 28px;
+      margin-bottom: 22px;
       position: relative;
       overflow: hidden;
     }
@@ -79,22 +85,78 @@
     }
 
     h1 {
-      font-size: clamp(2rem, 3vw, 3.2rem);
-      line-height: 1.12;
-      max-width: 12ch;
+      font-size: clamp(2.2rem, 3vw, 3.3rem);
+      line-height: 1.1;
+      max-width: 13ch;
     }
 
     .subhead {
       margin-top: 14px;
       color: var(--muted);
       font-size: 1rem;
-      max-width: 62ch;
+      max-width: 64ch;
       line-height: 1.7;
+    }
+
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    .hero-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(255, 253, 249, 0.88);
+      border: 1px solid rgba(92, 122, 95, 0.1);
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .stats-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+
+    .stat-card {
+      background: linear-gradient(180deg, rgba(255, 253, 249, 0.98), rgba(255, 250, 241, 0.96));
+      border: 1px solid rgba(176, 140, 74, 0.14);
+      border-radius: 22px;
+      box-shadow: var(--soft-shadow);
+      padding: 18px;
+    }
+
+    .stat-label {
+      font-size: 0.84rem;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+      font-weight: 700;
+    }
+
+    .stat-value {
+      font-family: 'Lora', serif;
+      font-size: 2rem;
+      line-height: 1;
+      margin-bottom: 10px;
+    }
+
+    .stat-context {
+      font-size: 0.92rem;
+      color: var(--muted);
+      line-height: 1.5;
     }
 
     .cards {
       display: grid;
-      gap: 20px;
+      gap: 22px;
     }
 
     .card {
@@ -105,16 +167,42 @@
       border: 1px solid var(--border);
     }
 
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
     .card-title {
-      font-size: 1.4rem;
+      font-size: 1.45rem;
       margin-bottom: 6px;
     }
 
     .card-description {
       color: var(--muted);
       font-size: 0.98rem;
-      margin-bottom: 18px;
       line-height: 1.6;
+      margin: 0;
+    }
+
+    .count-badge {
+      flex-shrink: 0;
+      min-width: 44px;
+      text-align: center;
+      padding: 10px 12px;
+      border-radius: 999px;
+      background: var(--accent-bg);
+      color: var(--gold);
+      font-weight: 700;
+    }
+
+    .queue-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 22px;
+      align-items: start;
     }
 
     .list {
@@ -127,59 +215,168 @@
       align-items: flex-start;
       justify-content: space-between;
       gap: 16px;
-      padding: 16px 18px;
+      padding: 18px;
       border-radius: var(--radius-md);
-      background: linear-gradient(180deg, rgba(250, 247, 242, 0.92), rgba(255, 255, 255, 0.98));
-      border: 1px solid rgba(92, 122, 95, 0.10);
+      background: linear-gradient(180deg, rgba(250, 247, 242, 0.95), rgba(255, 255, 255, 0.98));
+      border: 1px solid rgba(92, 122, 95, 0.1);
     }
 
-    .row-main {
-      min-width: 0;
+    .row.overdue { border-color: rgba(184, 106, 93, 0.18); background: linear-gradient(180deg, rgba(255, 246, 243, 0.98), rgba(255, 255, 255, 0.98)); }
+    .row.today { border-color: rgba(176, 140, 74, 0.2); background: linear-gradient(180deg, rgba(255, 250, 241, 0.98), rgba(255, 255, 255, 0.98)); }
+    .row.resolved { opacity: 0.95; }
+
+    .row-main { min-width: 0; }
+
+    .row-topline {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
     }
 
     .row-main strong {
       display: block;
       font-size: 1rem;
-      margin-bottom: 4px;
     }
+
+    .kind-pill,
+    .timing-pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .kind-pill { background: var(--sage-bg); color: var(--sage-deep); }
+    .timing-pill { background: var(--accent-bg); color: #8d6d33; }
+    .timing-pill.overdue { background: var(--rose-bg); color: var(--rose); }
 
     .context {
       color: var(--muted);
-      line-height: 1.55;
+      line-height: 1.6;
       font-size: 0.95rem;
     }
 
-    .draft-btn {
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+      max-width: 280px;
+    }
+
+    .btn {
       border: none;
-      background: var(--sage);
-      color: white;
-      padding: 11px 16px;
+      padding: 10px 14px;
       border-radius: 999px;
       font-weight: 600;
       cursor: pointer;
-      box-shadow: var(--soft-shadow);
       transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
       white-space: nowrap;
-      margin-top: 2px;
     }
 
-    .draft-btn:hover,
-    .draft-btn:focus-visible {
-      background: #4d6a50;
+    .btn:hover,
+    .btn:focus-visible {
       transform: translateY(-1px);
       outline: none;
     }
 
-    .nudge {
-      background: linear-gradient(135deg, rgba(176, 140, 74, 0.13), rgba(255, 253, 249, 0.92));
-      border: 1px solid rgba(176, 140, 74, 0.18);
+    .btn-primary {
+      background: var(--sage);
+      color: white;
       box-shadow: var(--soft-shadow);
     }
 
-    .nudge-copy {
+    .btn-primary:hover,
+    .btn-primary:focus-visible { background: var(--sage-deep); }
+
+    .btn-soft {
+      background: rgba(92, 122, 95, 0.08);
+      color: var(--sage-deep);
+    }
+
+    .btn-warm {
+      background: rgba(176, 140, 74, 0.12);
+      color: #8b6a2d;
+    }
+
+    .nudge { background: linear-gradient(135deg, rgba(176, 140, 74, 0.13), rgba(255, 253, 249, 0.92)); border: 1px solid rgba(176, 140, 74, 0.18); box-shadow: var(--soft-shadow); }
+    .nudge-copy { color: var(--charcoal); font-size: 1.02rem; line-height: 1.8; }
+
+    .warm-empty {
+      padding: 20px 18px;
+      border-radius: var(--radius-md);
+      border: 1px dashed rgba(92, 122, 95, 0.18);
+      background: rgba(255, 253, 249, 0.88);
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .composer {
+      position: sticky;
+      top: 18px;
+    }
+
+    .composer-card {
+      background: linear-gradient(180deg, rgba(255, 253, 249, 0.98), rgba(255, 250, 241, 0.98));
+    }
+
+    .chat-shell {
+      display: grid;
+      gap: 14px;
+    }
+
+    .chat-response {
+      min-height: 88px;
+      border-radius: 18px;
+      padding: 16px;
+      background: rgba(250, 247, 242, 0.9);
+      border: 1px solid rgba(92, 122, 95, 0.1);
       color: var(--charcoal);
-      font-size: 1.02rem;
-      line-height: 1.8;
+      line-height: 1.65;
+    }
+
+    .chat-input {
+      width: 100%;
+      border: 1px solid rgba(92, 122, 95, 0.16);
+      border-radius: 18px;
+      padding: 14px 16px;
+      min-height: 104px;
+      resize: vertical;
+      background: rgba(255, 255, 255, 0.86);
+      color: var(--charcoal);
+    }
+
+    .chat-input:focus-visible {
+      outline: 2px solid rgba(92, 122, 95, 0.18);
+      border-color: rgba(92, 122, 95, 0.24);
+    }
+
+    .composer-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .composer-hint {
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.5;
     }
 
     .status {
@@ -196,8 +393,7 @@
 
     .skeleton-hero,
     .skeleton-card,
-    .skeleton-line,
-    .skeleton-button {
+    .skeleton-line {
       position: relative;
       overflow: hidden;
       background: linear-gradient(90deg, rgba(255,255,255,0.45) 25%, rgba(255,255,255,0.82) 50%, rgba(255,255,255,0.45) 75%);
@@ -208,42 +404,21 @@
     .skeleton-hero {
       height: 220px;
       border-radius: 32px;
-      margin-bottom: 28px;
+      margin-bottom: 22px;
       background-color: rgba(92, 122, 95, 0.12);
     }
 
     .skeleton-card {
-      height: 190px;
+      height: 150px;
       border-radius: var(--radius-lg);
-      background-color: rgba(176, 140, 74, 0.10);
+      background-color: rgba(176, 140, 74, 0.1);
     }
 
     .skeleton-line {
       height: 14px;
       border-radius: 999px;
-      margin-bottom: 12px;
-      background-color: rgba(92, 122, 95, 0.12);
-    }
-
-    .skeleton-line.short { width: 34%; }
-    .skeleton-line.medium { width: 58%; }
-    .skeleton-line.long { width: 82%; }
-
-    .skeleton-button {
-      width: 112px;
-      height: 38px;
-      border-radius: 999px;
-      background-color: rgba(92, 122, 95, 0.16);
-      margin-left: auto;
-    }
-
-    .skeleton-layout {
-      display: grid;
-      gap: 20px;
-    }
-
-    .skeleton-inner {
-      padding: 24px;
+      margin-bottom: 10px;
+      background-color: rgba(92, 122, 95, 0.08);
     }
 
     @keyframes pulse {
@@ -251,294 +426,317 @@
       100% { background-position: -200% 0; }
     }
 
-    @media (max-width: 760px) {
-      .page { width: min(100% - 20px, 1100px); padding: 24px 0 48px; }
-      .hero, .card { padding: 20px; }
+    @media (max-width: 980px) {
+      .stats-strip,
+      .queue-grid { grid-template-columns: 1fr; }
+      .composer { position: static; }
+    }
+
+    @media (max-width: 720px) {
+      .page { width: min(100% - 20px, 1100px); padding-top: 24px; }
+      .hero, .card { padding: 22px 18px; }
       .row { flex-direction: column; }
-      .draft-btn { width: 100%; }
-      h1 { max-width: none; }
+      .actions { justify-content: flex-start; max-width: none; }
+      .stats-strip { grid-template-columns: 1fr 1fr; }
+    }
+
+    @media (max-width: 520px) {
+      .stats-strip { grid-template-columns: 1fr; }
+      .card-header { flex-direction: column; }
+      .count-badge { align-self: flex-start; }
     }
   </style>
 </head>
 <body>
   <main class="page">
-    <section id="loadingState" aria-live="polite">
+    <div id="loadingState" aria-hidden="true">
       <div class="skeleton-hero"></div>
-      <div class="skeleton-layout">
-        <div class="skeleton-card skeleton-inner">
-          <div class="skeleton-line short"></div>
-          <div class="skeleton-line long"></div>
-          <div class="skeleton-line medium"></div>
-          <div class="skeleton-button"></div>
+      <div class="stats-strip">
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
+        <div class="skeleton-card"></div>
+      </div>
+      <div class="queue-grid">
+        <div class="cards">
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
         </div>
-        <div class="skeleton-card skeleton-inner">
-          <div class="skeleton-line short"></div>
-          <div class="skeleton-line long"></div>
-          <div class="skeleton-line medium"></div>
-          <div class="skeleton-button"></div>
+        <div class="cards">
+          <div class="skeleton-card"></div>
+          <div class="skeleton-card"></div>
         </div>
       </div>
-    </section>
+    </div>
 
-    <section id="app" class="hidden">
-      <header class="hero">
-        <div class="eyebrow">Morning Briefing</div>
-        <h1 id="greeting">Good morning.</h1>
-        <p id="subhead" class="subhead"></p>
-      </header>
-      <section id="cards" class="cards"></section>
-    </section>
-
+    <div id="errorState" class="status hidden">Marge had trouble pulling today’s care workspace. Please try again in a moment.</div>
     <div id="emptyState" class="status hidden">It looks like your flock is well-tended today, Pastor.</div>
-    <div id="errorState" class="status hidden">Marge had trouble connecting. Try refreshing in a moment.</div>
+
+    <section id="workspace" class="hidden">
+      <section class="hero">
+        <div class="eyebrow">Marge Care Workspace</div>
+        <h1 id="greeting">Good morning.</h1>
+        <p id="subhead" class="subhead">A gentle look at who may need care and follow-up today.</p>
+        <div id="heroMeta" class="hero-meta"></div>
+      </section>
+
+      <section id="statsStrip" class="stats-strip"></section>
+
+      <section class="queue-grid">
+        <div class="cards" id="mainColumn"></div>
+        <aside class="cards composer" id="sideColumn"></aside>
+      </section>
+    </section>
   </main>
 
   <script>
-    const BASE_URL = 'https://marge-staging-staging.up.railway.app';
-    const API_URL = BASE_URL + '/briefing/today';
+    const BASE_URL = window.location.origin;
+    const BRIEFING_URL = BASE_URL + '/briefing/today';
+    const CARE_URL = BASE_URL + '/care/';
+    const PRAYERS_URL = BASE_URL + '/care/prayers/';
+    const MEMBERS_URL = BASE_URL + '/members/';
+    const VISITORS_URL = BASE_URL + '/visitors/';
+    const CHAT_URL = BASE_URL + '/chat/';
 
     const loadingState = document.getElementById('loadingState');
-    const app = document.getElementById('app');
-    const cards = document.getElementById('cards');
+    const errorState = document.getElementById('errorState');
+    const emptyState = document.getElementById('emptyState');
+    const workspace = document.getElementById('workspace');
     const greetingEl = document.getElementById('greeting');
     const subheadEl = document.getElementById('subhead');
-    const emptyState = document.getElementById('emptyState');
-    const errorState = document.getElementById('errorState');
+    const heroMetaEl = document.getElementById('heroMeta');
+    const statsStripEl = document.getElementById('statsStrip');
+    const mainColumnEl = document.getElementById('mainColumn');
+    const sideColumnEl = document.getElementById('sideColumn');
 
-    // ── Modal ──────────────────────────────────────────────────────────────────
-    const modal = document.createElement('div');
-    modal.id = 'draftModal';
-    modal.style.cssText = `display:none;position:fixed;inset:0;z-index:1000;background:rgba(44,44,44,0.45);
-      backdrop-filter:blur(4px);align-items:center;justify-content:center;`;
-    modal.innerHTML = `
-      <div style="background:#FAF7F2;border-radius:20px;padding:32px;max-width:520px;width:90%;
-        box-shadow:0 24px 64px rgba(44,44,44,0.18);border:1px solid rgba(176,140,74,0.2);">
-        <h3 style="font-family:'Lora',serif;font-size:1.2rem;color:#2C2C2C;margin:0 0 8px;">
-          Draft from Marge
-        </h3>
-        <p style="font-size:0.85rem;color:#6E6A63;margin:0 0 16px;">
-          Edit this before sending — it is a starting point, not a script.
-        </p>
-        <textarea id="draftText" style="width:100%;height:140px;border:1.5px solid rgba(176,140,74,0.3);
-          border-radius:12px;padding:14px;font-family:'Inter',sans-serif;font-size:0.95rem;
-          background:#fffdf9;color:#2C2C2C;resize:vertical;outline:none;line-height:1.6;"></textarea>
-        <div style="display:flex;gap:10px;margin-top:16px;justify-content:flex-end;">
-          <button id="modalClose" style="padding:10px 18px;border:1.5px solid rgba(92,122,95,0.3);
-            border-radius:10px;background:transparent;color:#5C7A5F;font-size:0.9rem;cursor:pointer;">
-            Close
-          </button>
-          <button id="modalCopy" style="padding:10px 22px;border:none;border-radius:10px;
-            background:#5C7A5F;color:#fff;font-size:0.9rem;cursor:pointer;font-weight:600;">
-            Copy to clipboard
-          </button>
-        </div>
-      </div>`;
-    document.body.appendChild(modal);
-
-    const showModal = (text) => {
-      document.getElementById('draftText').value = text;
-      modal.style.display = 'flex';
-    };
-
-    document.getElementById('modalClose').addEventListener('click', () => {
-      modal.style.display = 'none';
-    });
-    modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
-    document.getElementById('modalCopy').addEventListener('click', () => {
-      const btn = document.getElementById('modalCopy');
-      navigator.clipboard.writeText(document.getElementById('draftText').value).then(() => {
-        btn.textContent = 'Copied ✓';
-        btn.style.background = '#B08C4A';
-        setTimeout(() => { btn.textContent = 'Copy to clipboard'; btn.style.background = '#5C7A5F'; }, 2000);
-      });
-    });
-
-    // ── Toast ──────────────────────────────────────────────────────────────────
-    const showToast = (msg) => {
-      const t = document.createElement('div');
-      t.style.cssText = `position:fixed;bottom:100px;left:50%;transform:translateX(-50%);
-        background:#5C7A5F;color:#fff;padding:12px 24px;border-radius:12px;
-        font-size:0.9rem;font-weight:500;z-index:2000;opacity:0;transition:opacity 0.3s;
-        box-shadow:0 8px 24px rgba(92,122,95,0.3);`;
-      t.textContent = msg;
-      document.body.appendChild(t);
-      setTimeout(() => t.style.opacity = '1', 10);
-      setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2500);
-    };
-
-    // ── Chat bar ───────────────────────────────────────────────────────────────
-    const chatBar = document.createElement('div');
-    chatBar.style.cssText = `position:fixed;bottom:0;left:0;right:0;background:rgba(250,247,242,0.97);
-      border-top:1px solid rgba(176,140,74,0.18);padding:16px 24px;z-index:900;
-      backdrop-filter:blur(8px);`;
-    chatBar.innerHTML = `
-      <div id="chatHistory" style="max-width:800px;margin:0 auto 12px;display:none;flex-direction:column;gap:8px;max-height:160px;overflow-y:auto;"></div>
-      <div style="max-width:800px;margin:0 auto;display:flex;gap:10px;">
-        <input id="chatInput" type="text" placeholder="Tell Marge something... e.g. I visited Martha today, she is doing better"
-          style="flex:1;padding:12px 16px;border:1.5px solid rgba(176,140,74,0.3);border-radius:12px;
-          font-family:'Inter',sans-serif;font-size:0.9rem;background:#fffdf9;outline:none;color:#2C2C2C;" />
-        <button id="chatSend" style="padding:12px 20px;background:#B08C4A;color:#fff;border:none;
-          border-radius:12px;font-size:0.9rem;font-weight:600;cursor:pointer;white-space:nowrap;">
-          Send
-        </button>
-      </div>`;
-    document.body.appendChild(chatBar);
-
-    const chatHistory = document.getElementById('chatHistory');
-    const chatInput = document.getElementById('chatInput');
-    const chatSend = document.getElementById('chatSend');
-    let exchanges = [];
-
-    const addChatBubble = (text, isUser) => {
-      const bubble = document.createElement('div');
-      bubble.style.cssText = `padding:10px 14px;border-radius:12px;font-size:0.88rem;line-height:1.5;max-width:85%;
-        ${isUser
-          ? 'background:#5C7A5F;color:#fff;align-self:flex-end;margin-left:auto;'
-          : 'background:#fffdf9;color:#2C2C2C;border:1px solid rgba(176,140,74,0.2);align-self:flex-start;'}`;
-      bubble.textContent = text;
-      chatHistory.appendChild(bubble);
-      chatHistory.style.display = 'flex';
-      chatHistory.scrollTop = chatHistory.scrollHeight;
-      exchanges.push(bubble);
-      if (exchanges.length > 6) { exchanges[0].remove(); exchanges.shift(); }
-    };
-
-    const sendToMarge = async () => {
-      const msg = chatInput.value.trim();
-      if (!msg) return;
-      chatInput.value = '';
-      chatSend.disabled = true;
-      chatSend.textContent = '...';
-      addChatBubble(msg, true);
-      try {
-        const res = await fetch(BASE_URL + '/chat/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: msg })
-        });
-        const data = await res.json();
-        addChatBubble(data.reply || 'Got it.', false);
-      } catch (e) {
-        addChatBubble('Marge had trouble connecting. Try again in a moment.', false);
-      } finally {
-        chatSend.disabled = false;
-        chatSend.textContent = 'Send';
-      }
-    };
-
-    chatSend.addEventListener('click', sendToMarge);
-    chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendToMarge(); });
-
-    // ── Draft templates ────────────────────────────────────────────────────────
-    const draftTemplates = {
-      birthday: (name) =>
-        `Hey ${name}! Just wanted to say happy birthday — hope today is a great one. So grateful for you and the way you bless our church family. Let me know if you want to grab coffee soon!\n\n— Pastor Nathan`,
-      anniversary: (name) =>
-        `Hey ${name}! Thinking of you both today on your anniversary. What a gift your marriage is to our congregation. Hope you have a wonderful day celebrating together.\n\n— Pastor Nathan`,
-      visitor: (name) =>
-        `Hey ${name}! This is Pastor Nathan from Hallmark. So glad you could join us recently — it was great to have you. Would love to grab coffee sometime if you are open to it, no agenda, just wanted to connect. Hope to see you Sunday!\n\n— Pastor Nathan`,
-      hospital: (name) =>
-        `Hey ${name}, just thinking of you and wanted to check in. Praying for your recovery and believing God is at work even in the hard moments. Let me know if there is anything you need — I would love to stop by if that would be encouraging.\n\n— Pastor Nathan`,
-      absent: (name) =>
-        `Hey ${name}! It has been a while and I just wanted you to know you have been on my mind. Hope everything is going well — would love to catch up sometime soon.\n\n— Pastor Nathan`,
-      prayer: (name) =>
-        `Hey ${name}, just wanted you to know I have been praying for you and what you shared. You are not alone in this. Please do not hesitate to reach out if you need anything at all.\n\n— Pastor Nathan`,
-    };
-
-    const makeDraftButton = (type, name) => {
-      const button = document.createElement('button');
-      button.className = 'draft-btn';
-      button.type = 'button';
-      button.textContent = 'Draft a text';
-      button.addEventListener('click', () => {
-        const template = draftTemplates[type] || draftTemplates.absent;
-        showModal(template(name));
-      });
-      return button;
-    };
-
-    const makeContactedButton = (careId, rowEl) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.textContent = '✓ Mark contacted';
-      button.style.cssText = `padding:6px 12px;border:1.5px solid rgba(92,122,95,0.4);border-radius:8px;
-        background:transparent;color:#5C7A5F;font-size:0.8rem;cursor:pointer;margin-left:6px;
-        font-weight:500;transition:all 0.2s;white-space:nowrap;`;
-      button.addEventListener('click', async () => {
-        try {
-          await fetch(`${BASE_URL}/care/${careId}/contact`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ note: 'Contacted via Marge briefing' })
-          });
-        } catch (e) { /* still fade out */ }
-        rowEl.style.transition = 'opacity 0.4s, max-height 0.4s';
-        rowEl.style.opacity = '0';
-        rowEl.style.maxHeight = rowEl.offsetHeight + 'px';
-        setTimeout(() => { rowEl.style.maxHeight = '0'; rowEl.style.overflow = 'hidden'; }, 10);
-        setTimeout(() => rowEl.remove(), 500);
-        showToast('Logged — Marge will note this.');
-      });
-      return button;
-    };
-
-    // ── Helpers ────────────────────────────────────────────────────────────────
     const formatDate = (value) => {
-      if (!value) return 'Date unavailable';
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return value;
-      return date.toLocaleDateString(undefined, {
-        month: 'long',
-        day: 'numeric',
-        year: 'numeric'
-      });
+      if (!value) return 'recently';
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) return value;
+      return parsed.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     };
 
-    const makeRow = (name, context, draftType, careId) => {
+    const daysAgo = (value) => {
+      if (!value) return null;
+      const parsed = new Date(value);
+      if (Number.isNaN(parsed.getTime())) return null;
+      const now = new Date();
+      parsed.setHours(0, 0, 0, 0);
+      now.setHours(0, 0, 0, 0);
+      return Math.round((now - parsed) / 86400000);
+    };
+
+    const pluralize = (count, singular, plural = singular + 's') => `${count} ${count === 1 ? singular : plural}`;
+
+    const stripText = (value, fallback = '') => {
+      if (!value) return fallback;
+      return String(value).replace(/\s+/g, ' ').trim();
+    };
+
+    const draftTemplates = {
+      birthday: (name) => `Draft a warm birthday text for ${name} from Pastor. Keep it brief, pastoral, and personal.`,
+      anniversary: (name) => `Draft a warm anniversary note for ${name} from Pastor. Keep it grateful and pastoral.`,
+      absent: (name) => `Draft a short caring text to ${name}. Let them know they have been missed and gently invite conversation if needed.`,
+      visitor: (name) => `Draft a warm visitor follow-up text for ${name}. Keep it gracious, welcoming, and pastoral.`,
+      prayer: (name) => `Draft a pastoral message checking in with ${name} about their prayer request and asking how things are now.`,
+      care: (name, context) => `Draft a pastoral care text for ${name}. Context: ${context || 'ongoing care need'}. Keep it warm, direct, and prayerful.`,
+      queue: (name, context) => `Draft a warm pastoral follow-up for ${name}. Context: ${context || 'care follow-up'}. Keep it human, concise, and gentle.`
+    };
+
+    const safeFetchJson = (url) => fetch(url, { headers: { Accept: 'application/json' } }).then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    });
+
+    const makeHeroPill = (label, value) => {
+      const pill = document.createElement('div');
+      pill.className = 'hero-pill';
+      pill.textContent = `${label}: ${value}`;
+      return pill;
+    };
+
+    const makeStatCard = (label, value, context) => {
+      const card = document.createElement('section');
+      card.className = 'stat-card';
+      card.innerHTML = `
+        <div class="stat-label">${label}</div>
+        <div class="stat-value">${value}</div>
+        <div class="stat-context">${context}</div>
+      `;
+      return card;
+    };
+
+    const makeButton = (label, className, onClick) => {
+      const button = document.createElement('button');
+      button.className = `btn ${className}`;
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('click', onClick);
+      return button;
+    };
+
+    const postChat = async (message) => {
+      const response = await fetch(CHAT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ message, pastor_name: 'Pastor' })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    };
+
+    const markVisitorContacted = async (item) => {
+      const payload = {};
+      if (item.stage === 'day1') payload.follow_up_day1_sent = true;
+      if (item.stage === 'day3') payload.follow_up_day3_sent = true;
+      if (item.stage === 'week2') payload.follow_up_week2_sent = true;
+      const response = await fetch(`${VISITORS_URL}${item.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    };
+
+    const markCareContacted = async (item) => {
+      const response = await fetch(`${CARE_URL}${item.id}/contact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ note: 'Contacted from the care queue.' })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    };
+
+    const markPrayerUpdated = async (item) => {
+      const response = await fetch(`${PRAYERS_URL}${item.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ status: 'answered' })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    };
+
+    const makeQueueRow = (item, refreshWorkspace) => {
       const row = document.createElement('div');
-      row.className = 'row';
+      row.className = `row ${item.bucketClass || ''}`.trim();
 
       const main = document.createElement('div');
       main.className = 'row-main';
 
-      const strong = document.createElement('strong');
-      strong.textContent = name;
+      const topline = document.createElement('div');
+      topline.className = 'row-topline';
+
+      const name = document.createElement('strong');
+      name.textContent = item.title;
+
+      const kind = document.createElement('span');
+      kind.className = 'kind-pill';
+      kind.textContent = item.kindLabel;
+
+      const timing = document.createElement('span');
+      timing.className = `timing-pill ${item.isOverdue ? 'overdue' : ''}`.trim();
+      timing.textContent = item.timingLabel;
+
+      topline.append(name, kind, timing);
+
+      const context = document.createElement('div');
+      context.className = 'context';
+      context.textContent = item.context;
 
       const meta = document.createElement('div');
-      meta.className = 'context';
-      meta.textContent = context;
+      meta.className = 'meta';
+      (item.meta || []).filter(Boolean).forEach((value) => {
+        const span = document.createElement('span');
+        span.textContent = value;
+        meta.appendChild(span);
+      });
 
-      main.append(strong, meta);
+      main.append(topline, context);
+      if (meta.childNodes.length) main.appendChild(meta);
 
       const actions = document.createElement('div');
-      actions.style.cssText = 'display:flex;gap:6px;align-items:center;flex-shrink:0;';
-      actions.appendChild(makeDraftButton(draftType, name));
-      if (careId) actions.appendChild(makeContactedButton(careId, row));
+      actions.className = 'actions';
+
+      actions.appendChild(makeButton('Draft a text', 'btn-primary', async () => {
+        try {
+          const reply = await postChat(item.draftPrompt || draftTemplates.queue(item.title, item.context));
+          alert(reply.reply || 'Draft ready in Marge chat.');
+        } catch (error) {
+          alert('Marge could not draft that message just now.');
+        }
+      }));
+
+      actions.appendChild(makeButton('Tell Marge', 'btn-soft', () => {
+        const input = document.getElementById('chatInput');
+        if (input) {
+          input.value = `Marge, update ${item.title}: `;
+          input.focus();
+        }
+      }));
+
+      actions.appendChild(makeButton('Add note', 'btn-soft', () => {
+        const input = document.getElementById('chatInput');
+        if (input) {
+          input.value = `Add a note for ${item.title}: `;
+          input.focus();
+        }
+      }));
+
+      if (item.markAction) {
+        actions.appendChild(makeButton('Mark contacted', 'btn-warm', async () => {
+          try {
+            await item.markAction(item);
+            await refreshWorkspace();
+          } catch (error) {
+            alert('I could not mark that update just now.');
+          }
+        }));
+      }
 
       row.append(main, actions);
       return row;
     };
 
-    const makeCard = (title, description, rows, extraClass = '') => {
+    const makeSectionCard = (title, description, items, refreshWorkspace, extraClass = '') => {
       const card = document.createElement('section');
       card.className = `card ${extraClass}`.trim();
 
+      const header = document.createElement('div');
+      header.className = 'card-header';
+
+      const copy = document.createElement('div');
       const heading = document.createElement('h2');
       heading.className = 'card-title';
       heading.textContent = title;
+      const desc = document.createElement('p');
+      desc.className = 'card-description';
+      desc.textContent = description;
+      copy.append(heading, desc);
 
-      card.appendChild(heading);
+      const badge = document.createElement('div');
+      badge.className = 'count-badge';
+      badge.textContent = items.length;
 
-      if (description) {
-        const desc = document.createElement('p');
-        desc.className = 'card-description';
-        desc.textContent = description;
-        card.appendChild(desc);
+      header.append(copy, badge);
+      card.appendChild(header);
+
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'warm-empty';
+        empty.textContent = title === 'Recently Resolved'
+          ? 'No recently resolved care notes are showing yet. When a loop closes, Marge can hold that gratitude here.'
+          : 'Nothing is sitting here right now. That is a gentle grace today.';
+        card.appendChild(empty);
+        return card;
       }
 
       const list = document.createElement('div');
       list.className = 'list';
-      rows.forEach((row) => list.appendChild(row));
+      items.forEach((item) => list.appendChild(makeQueueRow(item, refreshWorkspace)));
       card.appendChild(list);
       return card;
     };
@@ -546,122 +744,286 @@
     const makeNudgeCard = (nudges) => {
       const card = document.createElement('section');
       card.className = 'card nudge';
-
-      const heading = document.createElement('h2');
-      heading.className = 'card-title';
-      heading.textContent = "💭 Today's Nudge";
-
-      const copy = document.createElement('div');
-      copy.className = 'nudge-copy';
-      copy.textContent = nudges.join(' ');
-
-      card.append(heading, copy);
+      card.innerHTML = `
+        <h2 class="card-title">💭 Today's Nudge</h2>
+        <div class="nudge-copy">${nudges.map((nudge) => `<p>${nudge}</p>`).join('')}</div>
+      `;
       return card;
     };
 
-    const hasItems = (value) => Array.isArray(value) && value.length > 0;
+    const makeComposerCard = (briefing) => {
+      const card = document.createElement('section');
+      card.className = 'card composer-card';
+      card.innerHTML = `
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">Tell Marge</h2>
+            <p class="card-description">Log a visit, close a loop, or ask for help drafting the next text.</p>
+          </div>
+        </div>
+      `;
 
-    const renderBriefing = (data) => {
-      greetingEl.textContent = data.greeting || 'Good morning.';
-      const pastorName = data.pastor_name || 'Pastor';
-      const churchName = data.church_name ? ` at ${data.church_name}` : '';
+      const shell = document.createElement('div');
+      shell.className = 'chat-shell';
+
+      const responseBox = document.createElement('div');
+      responseBox.className = 'chat-response';
+      responseBox.id = 'chatResponse';
+      responseBox.textContent = `I'm here, Pastor. You can tell me about a visit, an answered prayer, or who needs a note today.`;
+
+      const input = document.createElement('textarea');
+      input.className = 'chat-input';
+      input.id = 'chatInput';
+      input.placeholder = 'Tell Marge something... e.g. I visited Martha today and she is doing a little better.';
+
+      const actions = document.createElement('div');
+      actions.className = 'composer-actions';
+
+      const hint = document.createElement('div');
+      hint.className = 'composer-hint';
+      hint.textContent = `Today's briefing includes ${pluralize((briefing.active_care_cases || []).length, 'active care case')} and ${pluralize((briefing.visitors_needing_followup || []).length, 'visitor')} needing follow-up.`;
+
+      const sendButton = makeButton('Send to Marge', 'btn-primary', async () => {
+        const message = input.value.trim();
+        if (!message) return;
+        sendButton.disabled = true;
+        sendButton.textContent = 'Sending…';
+        try {
+          const reply = await postChat(message);
+          responseBox.textContent = reply.reply || 'Marge has that noted.';
+          input.value = '';
+        } catch (error) {
+          responseBox.textContent = 'I had trouble sending that to Marge just now. Please try again.';
+        } finally {
+          sendButton.disabled = false;
+          sendButton.textContent = 'Send to Marge';
+        }
+      });
+
+      actions.append(hint, sendButton);
+      shell.append(responseBox, input, actions);
+      card.appendChild(shell);
+      return card;
+    };
+
+    const buildQueue = ({ briefing, careCases, prayers, members, visitors }) => {
+      const today = [];
+      const overdue = [];
+      const active = [];
+      const resolved = [];
+
+      const addItem = (item) => {
+        if (item.group === 'resolved') resolved.push(item);
+        else if (item.group === 'overdue') overdue.push(item);
+        else if (item.group === 'today') today.push(item);
+        else active.push(item);
+      };
+
+      (careCases || []).forEach((care) => {
+        const age = daysAgo(care.last_contact || care.created_at);
+        const isOverdue = age !== null && age > 7;
+        const isToday = age === null || age >= 5;
+        addItem({
+          id: care.id,
+          title: care.member_name || 'Care case',
+          kindLabel: 'Care case',
+          timingLabel: isOverdue ? `${age} days since contact` : age === null ? 'Needs first touch' : age >= 0 ? `${age} days since contact` : 'In progress',
+          context: stripText(care.description, 'Ongoing pastoral care need.'),
+          meta: [care.category ? `Category: ${care.category}` : null, care.last_contact ? `Last contact ${formatDate(care.last_contact)}` : 'No contact logged yet'],
+          isOverdue,
+          bucketClass: isOverdue ? 'overdue' : isToday ? 'today' : '',
+          group: isOverdue ? 'overdue' : isToday ? 'today' : 'active',
+          draftPrompt: draftTemplates.care(care.member_name || 'this person', care.description),
+          markAction: markCareContacted
+        });
+      });
+
+      (visitors || []).forEach((visitor) => {
+        const visitAge = daysAgo(visitor.visit_date);
+        let stage = null;
+        let timingLabel = 'In follow-up';
+        let group = 'active';
+        if (!visitor.follow_up_day1_sent) {
+          stage = 'day1';
+          timingLabel = visitAge > 0 ? `Day 1 follow-up is late` : 'Welcome today';
+          group = visitAge > 0 ? 'overdue' : 'today';
+        } else if (!visitor.follow_up_day3_sent && visitAge >= 3) {
+          stage = 'day3';
+          timingLabel = visitAge > 3 ? `Day 3 follow-up is late` : 'Follow-up due today';
+          group = visitAge > 3 ? 'overdue' : 'today';
+        } else if (!visitor.follow_up_week2_sent && visitAge >= 14) {
+          stage = 'week2';
+          timingLabel = visitAge > 14 ? `Two-week touch is late` : 'Two-week touch due today';
+          group = visitAge > 14 ? 'overdue' : 'today';
+        } else if (!(visitor.follow_up_day1_sent && visitor.follow_up_day3_sent && visitor.follow_up_week2_sent)) {
+          stage = visitor.follow_up_day3_sent ? 'week2' : 'day3';
+          timingLabel = `Visited ${formatDate(visitor.visit_date)}`;
+          group = 'active';
+        }
+
+        if (!stage) return;
+
+        addItem({
+          id: visitor.id,
+          title: visitor.full_name,
+          kindLabel: 'Visitor follow-up',
+          timingLabel,
+          context: stripText(visitor.notes, `Visited on ${formatDate(visitor.visit_date)}. A warm follow-up would help them feel remembered.`),
+          meta: [`Visit date ${formatDate(visitor.visit_date)}`, visitor.source ? `Source: ${visitor.source}` : null],
+          isOverdue: group === 'overdue',
+          bucketClass: group === 'overdue' ? 'overdue' : group === 'today' ? 'today' : '',
+          group,
+          stage,
+          draftPrompt: draftTemplates.visitor(visitor.full_name),
+          markAction: markVisitorContacted
+        });
+      });
+
+      (members || []).forEach((member) => {
+        const absenceDays = daysAgo(member.last_attendance);
+        if (absenceDays === null || absenceDays < 21) return;
+        const group = absenceDays > 35 ? 'overdue' : absenceDays >= 28 ? 'today' : 'active';
+        addItem({
+          id: member.id,
+          title: member.full_name,
+          kindLabel: 'Absent member',
+          timingLabel: `${absenceDays} days since attendance`,
+          context: `You have not seen ${member.full_name.split(' ')[0]} in a little while. A simple touch may help them feel remembered.`,
+          meta: [member.last_attendance ? `Last attended ${formatDate(member.last_attendance)}` : 'No attendance date available'],
+          isOverdue: group === 'overdue',
+          bucketClass: group === 'overdue' ? 'overdue' : group === 'today' ? 'today' : '',
+          group,
+          draftPrompt: draftTemplates.absent(member.full_name)
+        });
+      });
+
+      (prayers || []).forEach((prayer) => {
+        const prayerAge = daysAgo(prayer.created_at || prayer.updated_at);
+        if (prayer.status && prayer.status !== 'active') {
+          resolved.push({
+            id: prayer.id,
+            title: prayer.submitted_by || 'Prayer request',
+            kindLabel: 'Resolved prayer',
+            timingLabel: prayer.status === 'answered' ? 'Answered prayer' : 'Closed request',
+            context: stripText(prayer.request_text, 'A prayer loop was recently closed.'),
+            meta: [prayer.updated_at ? `Updated ${formatDate(prayer.updated_at)}` : null],
+            bucketClass: 'resolved',
+            group: 'resolved',
+            draftPrompt: draftTemplates.prayer(prayer.submitted_by || 'them')
+          });
+          return;
+        }
+        if (prayerAge !== null && prayerAge < 14) return;
+        const group = prayerAge > 21 ? 'overdue' : prayerAge >= 14 ? 'today' : 'active';
+        addItem({
+          id: prayer.id,
+          title: prayer.submitted_by || 'Prayer request',
+          kindLabel: 'Prayer follow-up',
+          timingLabel: prayerAge ? `${prayerAge} days since request` : 'Needs update',
+          context: stripText(prayer.request_text, 'A prayer update may be due.'),
+          meta: [prayer.is_private ? 'Private request' : 'Share carefully', prayer.created_at ? `Submitted ${formatDate(prayer.created_at)}` : null],
+          isOverdue: group === 'overdue',
+          bucketClass: group === 'overdue' ? 'overdue' : group === 'today' ? 'today' : '',
+          group,
+          draftPrompt: draftTemplates.prayer(prayer.submitted_by || 'them'),
+          markAction: markPrayerUpdated
+        });
+      });
+
+      const sortByUrgency = (a, b) => a.title.localeCompare(b.title);
+      [today, overdue, active, resolved].forEach((group) => group.sort(sortByUrgency));
+      return { today, overdue, active, resolved };
+    };
+
+    const renderWorkspace = async () => {
+      const [briefing, careCases, prayers, members, visitors] = await Promise.all([
+        safeFetchJson(BRIEFING_URL),
+        safeFetchJson(CARE_URL),
+        safeFetchJson(PRAYERS_URL),
+        safeFetchJson(MEMBERS_URL),
+        safeFetchJson(VISITORS_URL)
+      ]);
+
+      greetingEl.textContent = briefing.greeting || 'Good morning.';
+      const pastorName = briefing.pastor_name || 'Pastor';
+      const churchName = briefing.church_name ? ` at ${briefing.church_name}` : '';
       subheadEl.textContent = `Here’s a gentle look at who may need care and follow-up today, ${pastorName}${churchName}.`;
 
-      const sections = [];
-      const celebrations = [
-        ...(data.birthdays_this_week || []).map((person) =>
-          makeRow(person.full_name, `Birthday on ${formatDate(person.birthday)}.`, 'birthday')
-        ),
-        ...(data.anniversaries_this_week || []).map((person) =>
-          makeRow(person.full_name, `Anniversary on ${formatDate(person.anniversary)}.`, 'anniversary')
-        )
-      ];
+      heroMetaEl.innerHTML = '';
+      heroMetaEl.append(
+        makeHeroPill('Generated', briefing.generated_at || 'Today'),
+        makeHeroPill('Care posture', 'Warm, present, attentive'),
+        makeHeroPill('Open loops', pluralize((careCases || []).filter((item) => item.status === 'active').length + (visitors || []).length, 'person'))
+      );
 
-      if (celebrations.length) {
-        sections.push(makeCard(
-          '🎂 Birthdays & Anniversaries This Week',
-          'A few joyful moments worth remembering this week.',
-          celebrations
-        ));
+      const queue = buildQueue({ briefing, careCases: (careCases || []).filter((item) => item.status === 'active'), prayers: prayers || [], members: members || [], visitors: visitors || [] });
+
+      statsStripEl.innerHTML = '';
+      statsStripEl.append(
+        makeStatCard('Visitors Needing Follow-Up', (visitors || []).filter((v) => !v.follow_up_day1_sent || !v.follow_up_day3_sent || !v.follow_up_week2_sent).length, 'New faces waiting on a thoughtful next touch.'),
+        makeStatCard('Active Care Cases', (careCases || []).filter((item) => item.status === 'active').length, 'Ongoing pastoral situations already in motion.'),
+        makeStatCard('Absent Members', (members || []).filter((member) => (daysAgo(member.last_attendance) || 0) >= 21).length, 'People you may want to gently check on.'),
+        makeStatCard('Prayer Requests Needing Update', (prayers || []).filter((prayer) => prayer.status === 'active' && (daysAgo(prayer.created_at || prayer.updated_at) || 0) >= 14).length, 'Requests that may need a fresh word or update.')
+      );
+
+      mainColumnEl.innerHTML = '';
+      mainColumnEl.append(
+        makeSectionCard('Morning Briefing', 'Keep the shape of the morning in view before you step into the queue.', [
+          ...((briefing.birthdays_this_week || []).map((person) => ({
+            title: person.full_name,
+            kindLabel: 'Birthday',
+            timingLabel: formatDate(person.birthday),
+            context: `${person.full_name.split(' ')[0]}'s birthday is coming this week.`,
+            meta: [person.phone ? 'Text-ready' : null],
+            draftPrompt: draftTemplates.birthday(person.full_name),
+            bucketClass: '',
+            group: 'active'
+          }))),
+          ...((briefing.anniversaries_this_week || []).map((person) => ({
+            title: person.full_name,
+            kindLabel: 'Anniversary',
+            timingLabel: formatDate(person.anniversary),
+            context: `A good day to bless ${person.full_name.split(' ')[0]} and celebrate their marriage.`,
+            meta: [person.phone ? 'Text-ready' : null],
+            draftPrompt: draftTemplates.anniversary(person.full_name),
+            bucketClass: '',
+            group: 'active'
+          })))
+        ], renderWorkspace),
+        makeSectionCard('Due Today', 'These are the touches that would be especially good to make today.', queue.today, renderWorkspace),
+        makeSectionCard('Overdue', 'These items feel a little stale and may need gentle attention first.', queue.overdue, renderWorkspace),
+        makeSectionCard('Active Queue', 'Open care loops that are still in motion, even if they are not urgent today.', queue.active, renderWorkspace),
+        makeSectionCard('Recently Resolved', 'Closed loops and answered prayers can land here as gratitude accumulates.', queue.resolved, renderWorkspace)
+      );
+
+      sideColumnEl.innerHTML = '';
+      sideColumnEl.append(makeComposerCard(briefing));
+      if (Array.isArray(briefing.nudges) && briefing.nudges.length) {
+        sideColumnEl.append(makeNudgeCard(briefing.nudges));
       }
 
-      if (hasItems(data.visitors_needing_followup)) {
-        sections.push(makeCard(
-          '👋 Visitors Needing Follow-Up',
-          'New faces may appreciate a warm word of welcome.',
-          data.visitors_needing_followup.map((visitor) =>
-            makeRow(visitor.full_name, `Visited on ${formatDate(visitor.visit_date)}. ${visitor.notes ? `Notes: ${visitor.notes}` : 'No additional notes.'}`, 'visitor')
-          )
-        ));
-      }
-
-      if (hasItems(data.active_care_cases)) {
-        sections.push(makeCard(
-          '🏥 Active Care Cases',
-          'Care needs already in motion that may merit a check-in.',
-          data.active_care_cases.map((person) => {
-            const details = [person.category, person.status, person.description, person.last_contact ? `Last contact ${formatDate(person.last_contact)}` : null]
-              .filter(Boolean)
-              .join(' • ');
-            return makeRow(person.member_name, details, 'hospital', person.id);
-          })
-        ));
-      }
-
-      if (hasItems(data.absent_members)) {
-        sections.push(makeCard(
-          '⏰ Members You Havent Seen in a While',
-          'A simple note can help someone feel remembered.',
-          data.absent_members.map((member) =>
-            makeRow(member.full_name, `Last attendance: ${formatDate(member.last_attendance)}.`, 'absent')
-          )
-        ));
-      }
-
-      if (hasItems(data.unanswered_prayers)) {
-        sections.push(makeCard(
-          '🙏 Prayer Requests Needing an Update',
-          'Requests that may benefit from a fresh touchpoint.',
-          data.unanswered_prayers.map((prayer) =>
-            makeRow(prayer.submitted_by || 'Anonymous', `${prayer.request_text}${prayer.status ? ` • Status: ${prayer.status}` : ''}`, 'prayer')
-          )
-        ));
-      }
-
-      if (hasItems(data.nudges)) {
-        sections.push(makeNudgeCard(data.nudges));
-      }
-
-      cards.innerHTML = '';
-      sections.forEach((section) => cards.appendChild(section));
-
+      const totalVisible = queue.today.length + queue.overdue.length + queue.active.length + queue.resolved.length + (briefing.birthdays_this_week || []).length + (briefing.anniversaries_this_week || []).length;
       loadingState.classList.add('hidden');
       errorState.classList.add('hidden');
 
-      if (sections.length === 0) {
+      if (totalVisible === 0) {
+        workspace.classList.add('hidden');
         emptyState.classList.remove('hidden');
-        app.classList.add('hidden');
         return;
       }
 
       emptyState.classList.add('hidden');
-      app.classList.remove('hidden');
+      workspace.classList.remove('hidden');
     };
 
     const showError = () => {
       loadingState.classList.add('hidden');
-      app.classList.add('hidden');
+      workspace.classList.add('hidden');
       emptyState.classList.add('hidden');
       errorState.classList.remove('hidden');
     };
 
-    fetch(API_URL, { headers: { Accept: 'application/json' } })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
-      .then(renderBriefing)
-      .catch(showError);
+    renderWorkspace().catch(showError);
   </script>
 </body>
 </html>
