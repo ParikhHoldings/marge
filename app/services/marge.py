@@ -7,6 +7,7 @@ API layer serializes and delivers.
 """
 
 import os
+import anthropic as anthropic_sdk
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
@@ -24,6 +25,14 @@ PRAYER_OVERDUE_DAYS = int(os.getenv("PRAYER_OVERDUE_DAYS", "14"))
 VISITOR_FOLLOWUP_DELAY_HOURS = int(os.getenv("VISITOR_FOLLOWUP_DELAY_HOURS", "48"))
 BIRTHDAY_LOOKAHEAD_DAYS = int(os.getenv("BIRTHDAY_LOOKAHEAD_DAYS", "7"))
 NUDGE_LOOKBACK_DAYS = int(os.getenv("NUDGE_LOOKBACK_DAYS", "14"))
+
+
+def _get_anthropic_client():
+    """Return Anthropic client if API key is available, else None."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    return anthropic_sdk.Anthropic(api_key=api_key)
 
 
 # ── Morning Briefing ──────────────────────────────────────────────────────────
@@ -68,6 +77,103 @@ def generate_morning_briefing(db: Session, pastor_name: str, church_name: str) -
     }
 
     return briefing
+
+
+def generate_ai_briefing(briefing_data: dict, pastor_name: str, church_name: str) -> str:
+    """
+    Generate a Claude-powered AI briefing that reasons about pastoral needs.
+
+    Args:
+        briefing_data: The dict returned by generate_morning_briefing() (with ORM objects)
+        pastor_name:   Pastor's first name
+        church_name:   Church name
+
+    Returns:
+        AI-generated prose briefing, or falls back to plain_text if no API key.
+    """
+    client = _get_anthropic_client()
+    if not client:
+        # Graceful fallback to plain text
+        return render_briefing_text(briefing_data)
+
+    # Build context for Claude
+    sections = []
+
+    birthdays = briefing_data.get("birthdays_this_week", [])
+    if birthdays:
+        names = [m.full_name for m in birthdays]
+        sections.append(f"Birthdays this week: {', '.join(names)}")
+
+    anniversaries = briefing_data.get("anniversaries_this_week", [])
+    if anniversaries:
+        names = [m.full_name for m in anniversaries]
+        sections.append(f"Anniversaries this week: {', '.join(names)}")
+
+    visitors = briefing_data.get("visitors_needing_followup", [])
+    if visitors:
+        v_info = [f"{v.full_name} (visited {(date.today()-v.visit_date).days} days ago{', notes: ' + v.notes if v.notes else ''})" for v in visitors]
+        sections.append(f"Visitors needing follow-up: {', '.join(v_info)}")
+
+    care = briefing_data.get("active_care_cases", [])
+    if care:
+        c_info = []
+        for c in care:
+            member_name = c.member.full_name if c.member else "Unknown"
+            last = f"last contact {(date.today()-c.last_contact).days} days ago" if c.last_contact else "no contact logged"
+            c_info.append(f"{member_name} [{c.category.value if hasattr(c.category, 'value') else c.category}] - {last}: {c.description[:80] if c.description else 'no details'}")
+        sections.append("Active care cases:\n" + "\n".join(f"  - {x}" for x in c_info))
+
+    absent = briefing_data.get("absent_members", [])
+    if absent:
+        a_info = [f"{m.full_name} ({(date.today()-m.last_attendance).days} days)" for m in absent if m.last_attendance]
+        if a_info:
+            sections.append(f"Absent members: {', '.join(a_info)}")
+
+    prayers = briefing_data.get("unanswered_prayers", [])
+    if prayers:
+        p_info = [f"{p.member.full_name if p.member else (p.submitted_by or 'Anonymous')}: \"{p.request_text[:60]}\"" for p in prayers]
+        sections.append("Prayer requests needing follow-up:\n" + "\n".join(f"  - {x}" for x in p_info))
+
+    nudges = briefing_data.get("nudges", [])
+    if nudges:
+        sections.append("Notes from recent conversations:\n" + "\n".join(f"  - {n}" for n in nudges))
+
+    if not sections:
+        context = "No urgent pastoral needs flagged today. The congregation appears to be in good shape."
+    else:
+        context = "\n\n".join(sections)
+
+    prompt = f"""You are Marge, the AI church secretary for {pastor_name} at {church_name}.
+
+You have just reviewed all the pastoral care data for today. Here is what you found:
+
+{context}
+
+Write Pastor {pastor_name}'s morning briefing. You are a wise, warm church secretary who genuinely knows and cares about these people.
+
+Rules:
+- Use the pastor's first name ({pastor_name}), not "Pastor {pastor_name}" every time
+- Mention specific people by name with specific context
+- Connect dots the pastor might miss (e.g., someone who lost their job AND stopped attending — those are probably related)
+- Prioritize by urgency, not alphabetically
+- Be concise — pastors are busy Monday mornings
+- End with 1-2 specific suggested actions for today
+- Never sound like a CRM. Sound like a person who knows these people.
+- Warm, direct, helpful. No fluff. No bullet points — write it as natural prose.
+- If nothing urgent, say so warmly and suggest one proactive thing to do.
+
+Write the briefing now."""
+
+    try:
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return message.content[0].text
+    except Exception as e:
+        # Fallback to plain text on any API error
+        return render_briefing_text(briefing_data) + f"\n\n[AI briefing unavailable: {str(e)[:100]}]"
 
 
 def _get_birthdays_this_week(db: Session, today: date, week_end: date) -> List[Member]:
@@ -195,7 +301,7 @@ def draft_visitor_followup(
     event_or_service: str = "Sunday service",
 ) -> str:
     """
-    Draft a follow-up message for a first-time visitor.
+    Draft a follow-up message for a first-time visitor using Claude.
 
     Args:
         visitor:         The Visitor ORM object.
@@ -205,36 +311,68 @@ def draft_visitor_followup(
         event_or_service: Used in the Week-2 invitation template.
 
     Returns:
-        A warm, pre-written draft the pastor reviews before sending.
-        Not salesy. Zero pressure. Written like a person, not a system.
+        A warm, AI-generated draft the pastor reviews before sending.
     """
-    first_name = visitor.first_name
+    client = _get_anthropic_client()
 
-    if day == 1:
-        return voice.FOLLOW_UP_DAY1_TEMPLATE.format(
-            first_name=first_name,
-            pastor_name=pastor_name,
-            church_name=church_name,
+    if not client:
+        # Fallback to templates
+        first_name = visitor.first_name
+        if day == 1:
+            return voice.FOLLOW_UP_DAY1_TEMPLATE.format(
+                first_name=first_name, pastor_name=pastor_name, church_name=church_name,
+            )
+        elif day == 3:
+            return voice.FOLLOW_UP_DAY3_TEMPLATE.format(
+                first_name=first_name, pastor_name=pastor_name, church_name=church_name,
+            )
+        elif day == 14:
+            return voice.FOLLOW_UP_WEEK2_TEMPLATE.format(
+                first_name=first_name, pastor_name=pastor_name, church_name=church_name,
+                event_or_service=event_or_service,
+            )
+        else:
+            return (
+                f"Hey {first_name}, just wanted to check in and see how you're doing. "
+                f"We'd love to see you again sometime. — {pastor_name}"
+            )
+
+    day_context = {
+        1: "This is a same-day or next-day brief friendly text.",
+        3: "This is a 3-day follow-up — a bit warmer, maybe answer a question they might have.",
+        14: "This is a 2-week gentle invitation to come back.",
+    }.get(day, "This is a follow-up message.")
+
+    days_since = (date.today() - visitor.visit_date).days
+
+    prompt = f"""Draft a {day_context} from {pastor_name} to {visitor.full_name}, who visited {church_name} {days_since} days ago.
+
+Additional context: {visitor.notes or 'none'}
+
+Rules:
+- Short (2-4 sentences max for text, 4-6 for email)
+- Warm, genuine, zero pressure
+- No sales language
+- Sounds like it was written by a real person, not a church office
+- Sign off as "{pastor_name}" (first name only)
+
+Write only the message, no subject line or explanation."""
+
+    try:
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}]
         )
-    elif day == 3:
-        return voice.FOLLOW_UP_DAY3_TEMPLATE.format(
-            first_name=first_name,
-            pastor_name=pastor_name,
-            church_name=church_name,
-        )
-    elif day == 14:
-        return voice.FOLLOW_UP_WEEK2_TEMPLATE.format(
-            first_name=first_name,
-            pastor_name=pastor_name,
-            church_name=church_name,
-            event_or_service=event_or_service,
-        )
-    else:
-        # Fallback: generic warm message
-        return (
-            f"Hey {first_name}, just wanted to check in and see how you're doing. "
-            f"We'd love to see you again sometime. — Pastor {pastor_name}"
-        )
+        return message.content[0].text
+    except Exception as e:
+        # Fallback to template on error
+        first_name = visitor.first_name
+        if day == 1:
+            return voice.FOLLOW_UP_DAY1_TEMPLATE.format(
+                first_name=first_name, pastor_name=pastor_name, church_name=church_name,
+            )
+        return f"Hey {first_name}, just wanted to reach out. — {pastor_name}"
 
 
 # ── Pastoral Care Drafts ──────────────────────────────────────────────────────
@@ -245,39 +383,156 @@ def draft_care_message(
     pastor_name: str = "Pastor",
 ) -> str:
     """
-    Draft a pastoral care message for a member in a difficult situation.
-
-    Args:
-        member:      The Member ORM object.
-        situation:   One of: 'hospital', 'grief', 'crisis', or any freeform description.
-        pastor_name: Pastor's first name for the signature.
-
-    Returns:
-        A warm, human-sounding draft. Not scripted, not clinical.
-        The pastor reads it, edits if needed, and sends it.
+    Draft a pastoral care message for a member in a difficult situation using Claude.
     """
-    first_name = member.first_name
-    situation_lower = situation.lower()
+    client = _get_anthropic_client()
 
-    if "hospital" in situation_lower or "surgery" in situation_lower or "medical" in situation_lower:
-        return voice.CARE_MESSAGE_HOSPITAL.format(
-            first_name=first_name,
-            pastor_name=pastor_name,
+    if not client:
+        # Template fallback
+        first_name = member.first_name
+        situation_lower = situation.lower()
+        if "hospital" in situation_lower or "surgery" in situation_lower or "medical" in situation_lower:
+            return voice.CARE_MESSAGE_HOSPITAL.format(first_name=first_name, pastor_name=pastor_name)
+        elif "grief" in situation_lower or "loss" in situation_lower or "death" in situation_lower:
+            return voice.CARE_MESSAGE_GRIEF.format(first_name=first_name, pastor_name=pastor_name)
+        elif "crisis" in situation_lower or "emergency" in situation_lower:
+            return voice.CARE_MESSAGE_CRISIS.format(first_name=first_name, pastor_name=pastor_name)
+        else:
+            return voice.CARE_MESSAGE_GENERAL.format(first_name=first_name, pastor_name=pastor_name)
+
+    prompt = f"""Draft a pastoral care message from {pastor_name} to {member.full_name}.
+
+Situation: {situation}
+
+Rules:
+- Warm, compassionate, genuinely human
+- Short (3-5 sentences)
+- Offer presence, not solutions
+- No clichés ("everything happens for a reason", "God has a plan")
+- Sign off as "{pastor_name}" (first name only)
+
+Write only the message."""
+
+    try:
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}]
         )
-    elif "grief" in situation_lower or "loss" in situation_lower or "death" in situation_lower or "died" in situation_lower:
-        return voice.CARE_MESSAGE_GRIEF.format(
-            first_name=first_name,
-            pastor_name=pastor_name,
+        return message.content[0].text
+    except Exception:
+        return voice.CARE_MESSAGE_GENERAL.format(first_name=member.first_name, pastor_name=pastor_name)
+
+
+# ── Birthday / Anniversary Drafts ─────────────────────────────────────────────
+
+def draft_birthday_message(
+    member: Member,
+    pastor_name: str = "Pastor",
+) -> str:
+    """Draft a birthday greeting for a member using Claude."""
+    client = _get_anthropic_client()
+
+    if not client:
+        return voice.BIRTHDAY_TEMPLATE.format(first_name=member.first_name, pastor_name=pastor_name)
+
+    prompt = f"""Draft a brief, warm birthday text message from {pastor_name} to {member.full_name}.
+
+Rules:
+- 1-3 sentences max
+- Genuine and personal, not generic
+- No "may God bless you abundantly" clichés
+- Sign off as "{pastor_name}" (first name only)
+
+Write only the message."""
+
+    try:
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}]
         )
-    elif "crisis" in situation_lower or "emergency" in situation_lower or "urgent" in situation_lower:
-        return voice.CARE_MESSAGE_CRISIS.format(
-            first_name=first_name,
-            pastor_name=pastor_name,
+        return message.content[0].text
+    except Exception:
+        return voice.BIRTHDAY_TEMPLATE.format(first_name=member.first_name, pastor_name=pastor_name)
+
+
+def draft_anniversary_message(
+    member: Member,
+    pastor_name: str = "Pastor",
+) -> str:
+    """Draft a wedding anniversary greeting for a member using Claude."""
+    client = _get_anthropic_client()
+
+    today = date.today()
+    years = today.year - member.anniversary.year if member.anniversary else 0
+
+    if not client:
+        return voice.ANNIVERSARY_TEMPLATE.format(
+            first_name=member.first_name, years=years, pastor_name=pastor_name,
         )
-    else:
-        return voice.CARE_MESSAGE_GENERAL.format(
-            first_name=first_name,
-            pastor_name=pastor_name,
+
+    prompt = f"""Draft a brief, warm anniversary text message from {pastor_name} to {member.full_name}, celebrating {years} years of marriage.
+
+Rules:
+- 1-3 sentences max
+- Genuine warmth, not formulaic
+- Sign off as "{pastor_name}" (first name only)
+
+Write only the message."""
+
+    try:
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return message.content[0].text
+    except Exception:
+        return voice.ANNIVERSARY_TEMPLATE.format(
+            first_name=member.first_name, years=years, pastor_name=pastor_name,
+        )
+
+
+# ── Absence Check-In Drafts ───────────────────────────────────────────────────
+
+def draft_absence_checkin(
+    member: Member,
+    pastor_name: str = "Pastor",
+    church_name: str = "the church",
+) -> str:
+    """Draft a gentle 'we missed you' message for an absent member using Claude."""
+    client = _get_anthropic_client()
+
+    if not client:
+        return voice.ABSENCE_CHECKIN_TEMPLATE.format(
+            first_name=member.first_name, pastor_name=pastor_name, church_name=church_name,
+        )
+
+    days_absent = (date.today() - member.last_attendance).days if member.last_attendance else None
+    time_context = f"{days_absent} days" if days_absent else "a while"
+
+    prompt = f"""Draft a gentle check-in text from {pastor_name} to {member.full_name}, who hasn't been to {church_name} in {time_context}.
+
+Rules:
+- Zero pressure, zero guilt
+- Genuinely warm — this is a person, not a metric
+- 2-4 sentences
+- Just checking in, not recruiting
+- Sign off as "{pastor_name}" (first name only)
+
+Write only the message."""
+
+    try:
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return message.content[0].text
+    except Exception:
+        return voice.ABSENCE_CHECKIN_TEMPLATE.format(
+            first_name=member.first_name, pastor_name=pastor_name, church_name=church_name,
         )
 
 
@@ -347,76 +602,6 @@ def get_nudges(db: Session) -> List[str]:
             break
 
     return nudges
-
-
-# ── Birthday / Anniversary Drafts ─────────────────────────────────────────────
-
-def draft_birthday_message(
-    member: Member,
-    pastor_name: str = "Pastor",
-) -> str:
-    """
-    Draft a birthday greeting for a member.
-
-    Args:
-        member:      The Member ORM object.
-        pastor_name: Pastor's first name for the signature.
-
-    Returns:
-        A short, warm birthday text draft.
-    """
-    return voice.BIRTHDAY_TEMPLATE.format(
-        first_name=member.first_name,
-        pastor_name=pastor_name,
-    )
-
-
-def draft_anniversary_message(
-    member: Member,
-    pastor_name: str = "Pastor",
-) -> str:
-    """
-    Draft a wedding anniversary greeting for a member.
-
-    Args:
-        member:      The Member ORM object.
-        pastor_name: Pastor's first name for the signature.
-
-    Returns:
-        A short, warm anniversary text draft.
-    """
-    today = date.today()
-    years = today.year - member.anniversary.year if member.anniversary else 0
-    return voice.ANNIVERSARY_TEMPLATE.format(
-        first_name=member.first_name,
-        years=years,
-        pastor_name=pastor_name,
-    )
-
-
-# ── Absence Check-In Drafts ───────────────────────────────────────────────────
-
-def draft_absence_checkin(
-    member: Member,
-    pastor_name: str = "Pastor",
-    church_name: str = "the church",
-) -> str:
-    """
-    Draft a gentle 'we missed you' message for an absent member.
-
-    Args:
-        member:      The Member ORM object.
-        pastor_name: Pastor's first name for the signature.
-        church_name: Church name.
-
-    Returns:
-        A warm, zero-pressure check-in text draft.
-    """
-    return voice.ABSENCE_CHECKIN_TEMPLATE.format(
-        first_name=member.first_name,
-        pastor_name=pastor_name,
-        church_name=church_name,
-    )
 
 
 # ── Briefing as Plain Text (for Telegram / email) ────────────────────────────

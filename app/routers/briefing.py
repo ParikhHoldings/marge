@@ -14,7 +14,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.services.marge import generate_morning_briefing, render_briefing_text
+from app.services.marge import (
+    generate_morning_briefing,
+    generate_ai_briefing,
+    render_briefing_text,
+)
 
 router = APIRouter(prefix="/briefing", tags=["briefing"])
 
@@ -87,6 +91,7 @@ class BriefingResponse(BaseModel):
     unanswered_prayers: List[PrayerBrief]
     nudges: List[str]
     plain_text: str  # Pre-rendered text version for Telegram / email
+    ai_briefing: str  # Claude-generated prose briefing
 
 
 # ── Route ─────────────────────────────────────────────────────────────────────
@@ -105,7 +110,9 @@ def get_today_briefing(db: Session = Depends(get_db)):
     - Prayer requests older than 14 days with no update
     - Proactive relationship nudges
 
-    Also returns a plain_text version suitable for sending via Telegram or email.
+    Also returns:
+    - plain_text: suitable for Telegram or email
+    - ai_briefing: Claude-generated prose that reasons about congregants
     """
     pastor_name = os.getenv("PASTOR_NAME", "Pastor")
     church_name = os.getenv("CHURCH_NAME", "your church")
@@ -160,6 +167,9 @@ def get_today_briefing(db: Session = Depends(get_db)):
 
     plain_text = render_briefing_text(briefing)
 
+    # Generate AI briefing — falls back to plain_text if no API key or error
+    ai_briefing = generate_ai_briefing(briefing, pastor_name=pastor_name, church_name=church_name)
+
     return BriefingResponse(
         greeting=briefing["greeting"],
         pastor_name=briefing["pastor_name"],
@@ -173,4 +183,5 @@ def get_today_briefing(db: Session = Depends(get_db)):
         unanswered_prayers=[prayer_to_brief(p) for p in briefing["unanswered_prayers"]],
         nudges=briefing["nudges"],
         plain_text=plain_text,
+        ai_briefing=ai_briefing,
     )
