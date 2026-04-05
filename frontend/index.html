@@ -3,665 +3,175 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Marge Morning Briefing</title>
+  <title>Marge</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:wght@500;600;700&display=swap" rel="stylesheet" />
   <style>
-    :root {
-      --cream: #FAF7F2;
-      --sage: #5C7A5F;
-      --gold: #B08C4A;
-      --charcoal: #2C2C2C;
-      --card: #fffdf9;
-      --border: rgba(92, 122, 95, 0.12);
-      --shadow: 0 14px 34px rgba(44, 44, 44, 0.08);
-      --soft-shadow: 0 8px 22px rgba(176, 140, 74, 0.10);
-      --muted: #6E6A63;
-      --accent-bg: rgba(176, 140, 74, 0.10);
-      --sage-bg: rgba(92, 122, 95, 0.10);
-      --radius-lg: 24px;
-      --radius-md: 18px;
-      --radius-sm: 12px;
-    }
-
-    * { box-sizing: border-box; }
-    html, body { margin: 0; min-height: 100%; }
-    body {
-      font-family: 'Inter', sans-serif;
-      background:
-        radial-gradient(circle at top left, rgba(176, 140, 74, 0.12), transparent 28%),
-        radial-gradient(circle at top right, rgba(92, 122, 95, 0.10), transparent 22%),
-        var(--cream);
-      color: var(--charcoal);
-    }
-
-    .page {
-      width: min(1100px, calc(100% - 32px));
-      margin: 0 auto;
-      padding: 48px 0 72px;
-    }
-
-    .hero {
-      background: linear-gradient(145deg, rgba(255, 253, 249, 0.98), rgba(255, 250, 241, 0.94));
-      border: 1px solid rgba(176, 140, 74, 0.16);
-      border-radius: 32px;
-      box-shadow: var(--shadow);
-      padding: 36px 32px;
-      margin-bottom: 28px;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .hero::after {
-      content: "";
-      position: absolute;
-      inset: auto -60px -60px auto;
-      width: 180px;
-      height: 180px;
-      background: radial-gradient(circle, rgba(92, 122, 95, 0.12), transparent 70%);
-      pointer-events: none;
-    }
-
-    .eyebrow {
-      color: var(--sage);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      font-size: 0.76rem;
-      font-weight: 700;
-      margin-bottom: 12px;
-    }
-
-    h1, h2, h3 {
-      font-family: 'Lora', serif;
-      margin: 0;
-      color: var(--charcoal);
-    }
-
-    h1 {
-      font-size: clamp(2rem, 3vw, 3.2rem);
-      line-height: 1.12;
-      max-width: 12ch;
-    }
-
-    .subhead {
-      margin-top: 14px;
-      color: var(--muted);
-      font-size: 1rem;
-      max-width: 62ch;
-      line-height: 1.7;
-    }
-
-    .cards {
-      display: grid;
-      gap: 20px;
-    }
-
-    .card {
-      background: var(--card);
-      border-radius: var(--radius-lg);
-      padding: 24px;
-      box-shadow: var(--shadow);
-      border: 1px solid var(--border);
-    }
-
-    .card-title {
-      font-size: 1.4rem;
-      margin-bottom: 6px;
-    }
-
-    .card-description {
-      color: var(--muted);
-      font-size: 0.98rem;
-      margin-bottom: 18px;
-      line-height: 1.6;
-    }
-
-    .list {
-      display: grid;
-      gap: 12px;
-    }
-
-    .row {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 16px 18px;
-      border-radius: var(--radius-md);
-      background: linear-gradient(180deg, rgba(250, 247, 242, 0.92), rgba(255, 255, 255, 0.98));
-      border: 1px solid rgba(92, 122, 95, 0.10);
-    }
-
-    .row-main {
-      min-width: 0;
-    }
-
-    .row-main strong {
-      display: block;
-      font-size: 1rem;
-      margin-bottom: 4px;
-    }
-
-    .context {
-      color: var(--muted);
-      line-height: 1.55;
-      font-size: 0.95rem;
-    }
-
-    .draft-btn {
-      border: none;
-      background: var(--sage);
-      color: white;
-      padding: 11px 16px;
-      border-radius: 999px;
-      font-weight: 600;
-      cursor: pointer;
-      box-shadow: var(--soft-shadow);
-      transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
-      white-space: nowrap;
-      margin-top: 2px;
-    }
-
-    .draft-btn:hover,
-    .draft-btn:focus-visible {
-      background: #4d6a50;
-      transform: translateY(-1px);
-      outline: none;
-    }
-
-    .nudge {
-      background: linear-gradient(135deg, rgba(176, 140, 74, 0.13), rgba(255, 253, 249, 0.92));
-      border: 1px solid rgba(176, 140, 74, 0.18);
-      box-shadow: var(--soft-shadow);
-    }
-
-    .nudge-copy {
-      color: var(--charcoal);
-      font-size: 1.02rem;
-      line-height: 1.8;
-    }
-
-    .status {
-      text-align: center;
-      padding: 44px 24px;
-      color: var(--muted);
-      background: rgba(255, 253, 249, 0.82);
-      border: 1px dashed rgba(92, 122, 95, 0.22);
-      border-radius: var(--radius-lg);
-      box-shadow: var(--shadow);
-    }
-
-    .hidden { display: none !important; }
-
-    .skeleton-hero,
-    .skeleton-card,
-    .skeleton-line,
-    .skeleton-button {
-      position: relative;
-      overflow: hidden;
-      background: linear-gradient(90deg, rgba(255,255,255,0.45) 25%, rgba(255,255,255,0.82) 50%, rgba(255,255,255,0.45) 75%);
-      background-size: 200% 100%;
-      animation: pulse 1.8s ease-in-out infinite;
-    }
-
-    .skeleton-hero {
-      height: 220px;
-      border-radius: 32px;
-      margin-bottom: 28px;
-      background-color: rgba(92, 122, 95, 0.12);
-    }
-
-    .skeleton-card {
-      height: 190px;
-      border-radius: var(--radius-lg);
-      background-color: rgba(176, 140, 74, 0.10);
-    }
-
-    .skeleton-line {
-      height: 14px;
-      border-radius: 999px;
-      margin-bottom: 12px;
-      background-color: rgba(92, 122, 95, 0.12);
-    }
-
-    .skeleton-line.short { width: 34%; }
-    .skeleton-line.medium { width: 58%; }
-    .skeleton-line.long { width: 82%; }
-
-    .skeleton-button {
-      width: 112px;
-      height: 38px;
-      border-radius: 999px;
-      background-color: rgba(92, 122, 95, 0.16);
-      margin-left: auto;
-    }
-
-    .skeleton-layout {
-      display: grid;
-      gap: 20px;
-    }
-
-    .skeleton-inner {
-      padding: 24px;
-    }
-
-    @keyframes pulse {
-      0% { background-position: 200% 0; }
-      100% { background-position: -200% 0; }
-    }
-
-    @media (max-width: 760px) {
-      .page { width: min(100% - 20px, 1100px); padding: 24px 0 48px; }
-      .hero, .card { padding: 20px; }
-      .row { flex-direction: column; }
-      .draft-btn { width: 100%; }
-      h1 { max-width: none; }
-    }
+    :root{--cream:#faf7f2;--sage:#5c7a5f;--gold:#b08c4a;--charcoal:#2c2c2c;--muted:#6e6a63;--card:#fffdf9;--border:rgba(92,122,95,.12);--shadow:0 14px 34px rgba(44,44,44,.08);--soft:0 8px 22px rgba(176,140,74,.1)}
+    *{box-sizing:border-box} body{margin:0;font-family:Inter,sans-serif;background:var(--cream);color:var(--charcoal)}
+    .page{width:min(1100px,calc(100% - 24px));margin:0 auto;padding:20px 0 112px}
+    .hero,.card,.status,.composer{background:var(--card);border:1px solid var(--border);border-radius:24px;box-shadow:var(--shadow)}
+    .hero{padding:24px;margin-bottom:18px}.eyebrow{font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--sage);margin-bottom:10px}
+    h1,h2,h3{font-family:Lora,serif;margin:0}.hero h1{font-size:clamp(1.9rem,4vw,3.2rem);line-height:1.08}.sub{color:var(--muted);line-height:1.6;margin-top:12px}
+    .topbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:14px}.chips{display:flex;gap:8px;flex-wrap:wrap}
+    .chip{padding:9px 14px;border-radius:999px;border:1px solid rgba(176,140,74,.22);background:#fff7ea;font-size:.88rem;font-weight:600;color:#6b562e}
+    .toggle{display:flex;gap:8px}.toggle button,.btn{border:none;border-radius:999px;padding:11px 15px;font-weight:600;cursor:pointer}.toggle button{background:#ece7dc;color:#4d4a45}.toggle button.active,.btn.primary{background:var(--sage);color:#fff}.btn.secondary{background:rgba(176,140,74,.12);color:#7a602c}
+    .grid{display:grid;gap:16px}.brief-card{padding:22px}.briefing{font-size:1rem;line-height:1.75;color:#2f2f2f;white-space:pre-wrap}
+    .cards{display:grid;gap:16px;margin-top:16px}.card{padding:20px}.card h2{font-size:1.32rem;margin-bottom:6px}.desc{color:var(--muted);margin:0 0 14px;line-height:1.55}
+    .list{display:grid;gap:12px}.row{display:flex;gap:12px;justify-content:space-between;align-items:flex-start;padding:14px 16px;border-radius:16px;background:linear-gradient(180deg,rgba(250,247,242,.92),rgba(255,255,255,.98));border:1px solid rgba(92,122,95,.10)}
+    .row strong{display:block;margin-bottom:4px}.context{color:var(--muted);line-height:1.5;font-size:.95rem}.actions{display:flex;gap:8px;flex-wrap:wrap}.small{padding:9px 12px;border-radius:12px;border:none;cursor:pointer;font-weight:600}.draft{background:var(--sage);color:#fff}.ghost{background:transparent;border:1px solid rgba(92,122,95,.28);color:var(--sage)}
+    .status{padding:28px;text-align:center;color:var(--muted)} .hidden{display:none!important}
+    .composer{position:fixed;left:12px;right:12px;bottom:12px;padding:12px}.composer-inner{max-width:1100px;margin:0 auto;display:grid;gap:10px}.history{display:grid;gap:8px;max-height:180px;overflow:auto}.bubble{padding:10px 14px;border-radius:14px;max-width:85%;line-height:1.5;font-size:.92rem}.user{background:var(--sage);color:#fff;margin-left:auto}.assistant{background:#fff9ef;border:1px solid rgba(176,140,74,.2)}
+    .compose-row{display:flex;gap:10px}.compose-row input{flex:1;padding:14px 16px;border-radius:14px;border:1.5px solid rgba(176,140,74,.28);font-size:.95rem}
+    .meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.pill{padding:8px 11px;border-radius:999px;background:rgba(92,122,95,.09);color:var(--sage);font-size:.84rem;font-weight:600}
+    .modal{display:none;position:fixed;inset:0;background:rgba(44,44,44,.45);backdrop-filter:blur(4px);align-items:center;justify-content:center;padding:20px}.modal-card{background:var(--card);border-radius:24px;padding:22px;max-width:560px;width:100%;box-shadow:0 24px 64px rgba(44,44,44,.18)}
+    textarea{width:100%;min-height:180px;border-radius:14px;border:1.5px solid rgba(176,140,74,.3);padding:14px;font:inherit;line-height:1.6;background:#fffdf9}
+    @media (max-width:760px){.row,.compose-row{flex-direction:column}.actions,.small,.toggle button,.btn{width:100%}.page{padding-bottom:170px}}
   </style>
 </head>
 <body>
   <main class="page">
-    <section id="loadingState" aria-live="polite">
-      <div class="skeleton-hero"></div>
-      <div class="skeleton-layout">
-        <div class="skeleton-card skeleton-inner">
-          <div class="skeleton-line short"></div>
-          <div class="skeleton-line long"></div>
-          <div class="skeleton-line medium"></div>
-          <div class="skeleton-button"></div>
-        </div>
-        <div class="skeleton-card skeleton-inner">
-          <div class="skeleton-line short"></div>
-          <div class="skeleton-line long"></div>
-          <div class="skeleton-line medium"></div>
-          <div class="skeleton-button"></div>
-        </div>
+    <div class="topbar">
+      <div class="chips" id="metaChips"></div>
+      <div class="toggle">
+        <button id="liveBtn" class="active">Live data</button>
+        <button id="demoBtn">Demo</button>
       </div>
+    </div>
+
+    <section class="hero">
+      <div class="eyebrow">Morning Briefing</div>
+      <h1 id="greeting">Good morning.</h1>
+      <p class="sub" id="subhead">Loading today’s people…</p>
+      <div class="meta" id="heroMeta"></div>
     </section>
 
-    <section id="app" class="hidden">
-      <header class="hero">
-        <div class="eyebrow">Morning Briefing</div>
-        <h1 id="greeting">Good morning.</h1>
-        <p id="subhead" class="subhead"></p>
-      </header>
-      <section id="cards" class="cards"></section>
+    <section class="card brief-card">
+      <h2 style="margin-bottom:10px">Marge’s read on the day</h2>
+      <div id="aiBriefing" class="briefing">Loading…</div>
     </section>
 
-    <div id="emptyState" class="status hidden">It looks like your flock is well-tended today, Pastor.</div>
-    <div id="errorState" class="status hidden">Marge had trouble connecting. Try refreshing in a moment.</div>
+    <section id="cards" class="cards"></section>
+    <div id="empty" class="status hidden">There is not much in the live database yet. Switch to demo mode if you want to feel the product right now.</div>
+    <div id="error" class="status hidden">Marge hit a snag loading the briefing. Try refreshing in a moment.</div>
   </main>
 
-  <script>
-    const BASE_URL = 'https://marge-staging-staging.up.railway.app';
-    const API_URL = BASE_URL + '/briefing/today';
+  <div id="modal" class="modal">
+    <div class="modal-card">
+      <h3 style="margin-bottom:8px">Draft from Marge</h3>
+      <p class="desc">Edit before sending. Good assistants draft. Great pastors personalize.</p>
+      <textarea id="draftText"></textarea>
+      <div class="actions" style="margin-top:12px;justify-content:flex-end">
+        <button id="closeModal" class="small ghost">Close</button>
+        <button id="copyModal" class="small draft">Copy</button>
+      </div>
+    </div>
+  </div>
 
-    const loadingState = document.getElementById('loadingState');
-    const app = document.getElementById('app');
+  <section class="composer">
+    <div class="composer-inner">
+      <div id="history" class="history"></div>
+      <div class="compose-row">
+        <input id="chatInput" placeholder="Tell Marge something… e.g. I visited Martha today and she is doing better" />
+        <button id="chatSend" class="btn primary">Send</button>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    const API_BASE = window.location.origin;
+    let currentMode = new URLSearchParams(location.search).get('mode') === 'demo' ? 'demo' : 'live';
+    let latestBriefing = null;
+
+    const metaChips = document.getElementById('metaChips');
+    const heroMeta = document.getElementById('heroMeta');
     const cards = document.getElementById('cards');
     const greetingEl = document.getElementById('greeting');
     const subheadEl = document.getElementById('subhead');
-    const emptyState = document.getElementById('emptyState');
-    const errorState = document.getElementById('errorState');
-
-    // ── Modal ──────────────────────────────────────────────────────────────────
-    const modal = document.createElement('div');
-    modal.id = 'draftModal';
-    modal.style.cssText = `display:none;position:fixed;inset:0;z-index:1000;background:rgba(44,44,44,0.45);
-      backdrop-filter:blur(4px);align-items:center;justify-content:center;`;
-    modal.innerHTML = `
-      <div style="background:#FAF7F2;border-radius:20px;padding:32px;max-width:520px;width:90%;
-        box-shadow:0 24px 64px rgba(44,44,44,0.18);border:1px solid rgba(176,140,74,0.2);">
-        <h3 style="font-family:'Lora',serif;font-size:1.2rem;color:#2C2C2C;margin:0 0 8px;">
-          Draft from Marge
-        </h3>
-        <p style="font-size:0.85rem;color:#6E6A63;margin:0 0 16px;">
-          Edit this before sending — it is a starting point, not a script.
-        </p>
-        <textarea id="draftText" style="width:100%;height:140px;border:1.5px solid rgba(176,140,74,0.3);
-          border-radius:12px;padding:14px;font-family:'Inter',sans-serif;font-size:0.95rem;
-          background:#fffdf9;color:#2C2C2C;resize:vertical;outline:none;line-height:1.6;"></textarea>
-        <div style="display:flex;gap:10px;margin-top:16px;justify-content:flex-end;">
-          <button id="modalClose" style="padding:10px 18px;border:1.5px solid rgba(92,122,95,0.3);
-            border-radius:10px;background:transparent;color:#5C7A5F;font-size:0.9rem;cursor:pointer;">
-            Close
-          </button>
-          <button id="modalCopy" style="padding:10px 22px;border:none;border-radius:10px;
-            background:#5C7A5F;color:#fff;font-size:0.9rem;cursor:pointer;font-weight:600;">
-            Copy to clipboard
-          </button>
-        </div>
-      </div>`;
-    document.body.appendChild(modal);
-
-    const showModal = (text) => {
-      document.getElementById('draftText').value = text;
-      modal.style.display = 'flex';
-    };
-
-    document.getElementById('modalClose').addEventListener('click', () => {
-      modal.style.display = 'none';
-    });
-    modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
-    document.getElementById('modalCopy').addEventListener('click', () => {
-      const btn = document.getElementById('modalCopy');
-      navigator.clipboard.writeText(document.getElementById('draftText').value).then(() => {
-        btn.textContent = 'Copied ✓';
-        btn.style.background = '#B08C4A';
-        setTimeout(() => { btn.textContent = 'Copy to clipboard'; btn.style.background = '#5C7A5F'; }, 2000);
-      });
-    });
-
-    // ── Toast ──────────────────────────────────────────────────────────────────
-    const showToast = (msg) => {
-      const t = document.createElement('div');
-      t.style.cssText = `position:fixed;bottom:100px;left:50%;transform:translateX(-50%);
-        background:#5C7A5F;color:#fff;padding:12px 24px;border-radius:12px;
-        font-size:0.9rem;font-weight:500;z-index:2000;opacity:0;transition:opacity 0.3s;
-        box-shadow:0 8px 24px rgba(92,122,95,0.3);`;
-      t.textContent = msg;
-      document.body.appendChild(t);
-      setTimeout(() => t.style.opacity = '1', 10);
-      setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2500);
-    };
-
-    // ── Chat bar ───────────────────────────────────────────────────────────────
-    const chatBar = document.createElement('div');
-    chatBar.style.cssText = `position:fixed;bottom:0;left:0;right:0;background:rgba(250,247,242,0.97);
-      border-top:1px solid rgba(176,140,74,0.18);padding:16px 24px;z-index:900;
-      backdrop-filter:blur(8px);`;
-    chatBar.innerHTML = `
-      <div id="chatHistory" style="max-width:800px;margin:0 auto 12px;display:none;flex-direction:column;gap:8px;max-height:160px;overflow-y:auto;"></div>
-      <div style="max-width:800px;margin:0 auto;display:flex;gap:10px;">
-        <input id="chatInput" type="text" placeholder="Tell Marge something... e.g. I visited Martha today, she is doing better"
-          style="flex:1;padding:12px 16px;border:1.5px solid rgba(176,140,74,0.3);border-radius:12px;
-          font-family:'Inter',sans-serif;font-size:0.9rem;background:#fffdf9;outline:none;color:#2C2C2C;" />
-        <button id="chatSend" style="padding:12px 20px;background:#B08C4A;color:#fff;border:none;
-          border-radius:12px;font-size:0.9rem;font-weight:600;cursor:pointer;white-space:nowrap;">
-          Send
-        </button>
-      </div>`;
-    document.body.appendChild(chatBar);
-
-    const chatHistory = document.getElementById('chatHistory');
+    const aiBriefingEl = document.getElementById('aiBriefing');
+    const emptyEl = document.getElementById('empty');
+    const errorEl = document.getElementById('error');
+    const historyEl = document.getElementById('history');
     const chatInput = document.getElementById('chatInput');
     const chatSend = document.getElementById('chatSend');
-    let exchanges = [];
+    const liveBtn = document.getElementById('liveBtn');
+    const demoBtn = document.getElementById('demoBtn');
+    const modal = document.getElementById('modal');
+    const draftText = document.getElementById('draftText');
 
-    const addChatBubble = (text, isUser) => {
-      const bubble = document.createElement('div');
-      bubble.style.cssText = `padding:10px 14px;border-radius:12px;font-size:0.88rem;line-height:1.5;max-width:85%;
-        ${isUser
-          ? 'background:#5C7A5F;color:#fff;align-self:flex-end;margin-left:auto;'
-          : 'background:#fffdf9;color:#2C2C2C;border:1px solid rgba(176,140,74,0.2);align-self:flex-start;'}`;
-      bubble.textContent = text;
-      chatHistory.appendChild(bubble);
-      chatHistory.style.display = 'flex';
-      chatHistory.scrollTop = chatHistory.scrollHeight;
-      exchanges.push(bubble);
-      if (exchanges.length > 6) { exchanges[0].remove(); exchanges.shift(); }
-    };
-
-    const sendToMarge = async () => {
-      const msg = chatInput.value.trim();
-      if (!msg) return;
-      chatInput.value = '';
-      chatSend.disabled = true;
-      chatSend.textContent = '...';
-      addChatBubble(msg, true);
-      try {
-        const res = await fetch(BASE_URL + '/chat/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: msg })
-        });
-        const data = await res.json();
-        addChatBubble(data.reply || 'Got it.', false);
-      } catch (e) {
-        addChatBubble('Marge had trouble connecting. Try again in a moment.', false);
-      } finally {
-        chatSend.disabled = false;
-        chatSend.textContent = 'Send';
-      }
-    };
-
-    chatSend.addEventListener('click', sendToMarge);
-    chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendToMarge(); });
-
-    // ── Draft templates ────────────────────────────────────────────────────────
     const draftTemplates = {
-      birthday: (name) =>
-        `Hey ${name}! Just wanted to say happy birthday — hope today is a great one. So grateful for you and the way you bless our church family. Let me know if you want to grab coffee soon!\n\n— Pastor Nathan`,
-      anniversary: (name) =>
-        `Hey ${name}! Thinking of you both today on your anniversary. What a gift your marriage is to our congregation. Hope you have a wonderful day celebrating together.\n\n— Pastor Nathan`,
-      visitor: (name) =>
-        `Hey ${name}! This is Pastor Nathan from Hallmark. So glad you could join us recently — it was great to have you. Would love to grab coffee sometime if you are open to it, no agenda, just wanted to connect. Hope to see you Sunday!\n\n— Pastor Nathan`,
-      hospital: (name) =>
-        `Hey ${name}, just thinking of you and wanted to check in. Praying for your recovery and believing God is at work even in the hard moments. Let me know if there is anything you need — I would love to stop by if that would be encouraging.\n\n— Pastor Nathan`,
-      absent: (name) =>
-        `Hey ${name}! It has been a while and I just wanted you to know you have been on my mind. Hope everything is going well — would love to catch up sometime soon.\n\n— Pastor Nathan`,
-      prayer: (name) =>
-        `Hey ${name}, just wanted you to know I have been praying for you and what you shared. You are not alone in this. Please do not hesitate to reach out if you need anything at all.\n\n— Pastor Nathan`,
+      birthday: (name) => `Hey ${name}! Just wanted to say happy birthday. Grateful for you and the way you bless our church family. Hope you have a really good day.\n\n— Nathan`,
+      anniversary: (name) => `Hey ${name}! Thinking of you both today and thanking God for your marriage. Hope you have a wonderful anniversary together.\n\n— Nathan`,
+      visitor: (name) => `Hey ${name}! This is Pastor Nathan from Hallmark. Really glad you joined us recently. I would love to grab coffee sometime if you are open to it.\n\n— Nathan`,
+      hospital: (name) => `Hey ${name}, just wanted to check in and let you know I am praying for you today. If a visit or anything practical would help, I would be glad to be there.\n\n— Nathan`,
+      absent: (name) => `Hey ${name}! You have been on my mind and I just wanted to check in. Hope you are doing well. If you need anything, I would love to help.\n\n— Nathan`,
+      prayer: (name) => `Hey ${name}, just wanted you to know I have been praying for you. You are not alone in this. Let me know if there is anything you need.\n\n— Nathan`
     };
 
-    const makeDraftButton = (type, name) => {
-      const button = document.createElement('button');
-      button.className = 'draft-btn';
-      button.type = 'button';
-      button.textContent = 'Draft a text';
-      button.addEventListener('click', () => {
-        const template = draftTemplates[type] || draftTemplates.absent;
-        showModal(template(name));
-      });
-      return button;
-    };
+    function chip(text){ const el=document.createElement('div'); el.className='chip'; el.textContent=text; return el; }
+    function pill(text){ const el=document.createElement('div'); el.className='pill'; el.textContent=text; return el; }
+    function section(title, desc, rows){ const card=document.createElement('section'); card.className='card'; card.innerHTML=`<h2>${title}</h2><p class="desc">${desc}</p>`; const list=document.createElement('div'); list.className='list'; rows.forEach(r=>list.appendChild(r)); card.appendChild(list); return card; }
+    function row(name, context, kind, careId){ const wrap=document.createElement('div'); wrap.className='row'; const left=document.createElement('div'); left.innerHTML=`<strong>${name}</strong><div class="context">${context}</div>`; const actions=document.createElement('div'); actions.className='actions'; const draft=document.createElement('button'); draft.className='small draft'; draft.textContent='Draft'; draft.onclick=()=>openDraft((draftTemplates[kind]||draftTemplates.absent)(name)); actions.appendChild(draft); if(careId){ const done=document.createElement('button'); done.className='small ghost'; done.textContent='Mark contacted'; done.onclick=async()=>{ await fetch(`${API_BASE}/care/${careId}/contact`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({note:'Contacted via Marge web app'})}); wrap.remove();}; actions.appendChild(done);} wrap.append(left,actions); return wrap; }
+    function fmt(value){ if(!value) return 'Date unavailable'; const d=new Date(value); return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString(undefined,{month:'long',day:'numeric'}); }
+    function openDraft(text){ draftText.value=text; modal.style.display='flex'; }
+    document.getElementById('closeModal').onclick=()=>modal.style.display='none';
+    document.getElementById('copyModal').onclick=async()=>{ await navigator.clipboard.writeText(draftText.value); document.getElementById('copyModal').textContent='Copied'; setTimeout(()=>document.getElementById('copyModal').textContent='Copy',1200); };
+    modal.onclick=(e)=>{ if(e.target===modal) modal.style.display='none'; };
 
-    const makeContactedButton = (careId, rowEl) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.textContent = '✓ Mark contacted';
-      button.style.cssText = `padding:6px 12px;border:1.5px solid rgba(92,122,95,0.4);border-radius:8px;
-        background:transparent;color:#5C7A5F;font-size:0.8rem;cursor:pointer;margin-left:6px;
-        font-weight:500;transition:all 0.2s;white-space:nowrap;`;
-      button.addEventListener('click', async () => {
-        try {
-          await fetch(`${BASE_URL}/care/${careId}/contact`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ note: 'Contacted via Marge briefing' })
-          });
-        } catch (e) { /* still fade out */ }
-        rowEl.style.transition = 'opacity 0.4s, max-height 0.4s';
-        rowEl.style.opacity = '0';
-        rowEl.style.maxHeight = rowEl.offsetHeight + 'px';
-        setTimeout(() => { rowEl.style.maxHeight = '0'; rowEl.style.overflow = 'hidden'; }, 10);
-        setTimeout(() => rowEl.remove(), 500);
-        showToast('Logged — Marge will note this.');
-      });
-      return button;
-    };
+    function setMode(mode){ currentMode=mode; const params=new URLSearchParams(location.search); params.set('mode', mode); history.replaceState({}, '', `${location.pathname}?${params}`); liveBtn.classList.toggle('active', mode==='live'); demoBtn.classList.toggle('active', mode==='demo'); loadBriefing(); }
+    liveBtn.onclick=()=>setMode('live'); demoBtn.onclick=()=>setMode('demo');
 
-    // ── Helpers ────────────────────────────────────────────────────────────────
-    const formatDate = (value) => {
-      if (!value) return 'Date unavailable';
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return value;
-      return date.toLocaleDateString(undefined, {
-        month: 'long',
-        day: 'numeric',
-        year: 'numeric'
-      });
-    };
+    function addBubble(text, who){ const b=document.createElement('div'); b.className=`bubble ${who}`; b.textContent=text; historyEl.appendChild(b); historyEl.scrollTop=historyEl.scrollHeight; }
 
-    const makeRow = (name, context, draftType, careId) => {
-      const row = document.createElement('div');
-      row.className = 'row';
+    async function sendChat(){
+      const message = chatInput.value.trim(); if(!message) return;
+      chatInput.value=''; chatSend.disabled=true; addBubble(message,'user');
+      try{
+        const res = await fetch(`${API_BASE}/chat/`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message,mode:currentMode})});
+        const data = await res.json();
+        addBubble(data.reply,'assistant');
+        if(data.saved && currentMode==='live') setTimeout(loadBriefing, 350);
+      }catch(e){ addBubble('Marge had trouble saving that. Try once more in a moment.','assistant'); }
+      chatSend.disabled=false;
+    }
+    chatSend.onclick=sendChat; chatInput.addEventListener('keydown',e=>{ if(e.key==='Enter') sendChat(); });
 
-      const main = document.createElement('div');
-      main.className = 'row-main';
+    async function loadBriefing(){
+      errorEl.classList.add('hidden'); emptyEl.classList.add('hidden'); cards.innerHTML=''; aiBriefingEl.textContent='Loading…'; heroMeta.innerHTML=''; metaChips.innerHTML='';
+      try{
+        const res = await fetch(`${API_BASE}/briefing/today?mode=${currentMode}`);
+        if(!res.ok) throw new Error('bad response');
+        const data = await res.json(); latestBriefing = data;
+        greetingEl.textContent = data.greeting;
+        subheadEl.textContent = data.mode==='demo' ? 'Demo mode is showing a realistic sample church day so you can feel the product immediately.' : 'Live mode is reading the actual Marge database and surfacing who needs care today.';
+        aiBriefingEl.textContent = data.ai_briefing || data.plain_text;
+        metaChips.append(chip(data.mode==='demo' ? 'Demo mode' : 'Live data'));
+        if(data.ai_provider) metaChips.append(chip(`AI: ${data.ai_provider}`));
+        metaChips.append(chip(`${data.stats.members} members`));
+        metaChips.append(chip(`${data.stats.visitors} visitors`));
+        heroMeta.append(pill(`Generated ${new Date(data.generated_at).toLocaleString()}`));
+        heroMeta.append(pill(data.data_status.replaceAll('_',' ')));
 
-      const strong = document.createElement('strong');
-      strong.textContent = name;
+        const sections=[];
+        if(data.birthdays_this_week.length || data.anniversaries_this_week.length){
+          sections.push(section('Birthdays & anniversaries','Easy wins. Low effort, high care.',[
+            ...data.birthdays_this_week.map(p=>row(p.full_name,`Birthday on ${fmt(p.birthday)}.`, 'birthday')),
+            ...data.anniversaries_this_week.map(p=>row(p.full_name,`Anniversary on ${fmt(p.anniversary)}.`, 'anniversary')),
+          ]));
+        }
+        if(data.visitors_needing_followup.length){ sections.push(section('Visitors needing follow-up','These are the people most likely to feel whether your church noticed them.', data.visitors_needing_followup.map(v=>row(v.full_name, `Visited ${fmt(v.visit_date)}. ${v.notes||'No extra notes.'}`, 'visitor')))); }
+        if(data.active_care_cases.length){ sections.push(section('Active care cases','People already carrying something heavy.', data.active_care_cases.map(c=>row(c.member_name || 'Unknown', [c.category,c.description,c.last_contact ? `Last contact ${fmt(c.last_contact)}` : 'No recent contact logged'].filter(Boolean).join(' • '), 'hospital', c.id)))); }
+        if(data.absent_members.length){ sections.push(section('People you have not seen in a while','Absence is not guilt ammo. It is usually a clue.', data.absent_members.map(m=>row(m.full_name, `Last attendance ${fmt(m.last_attendance)}.`, 'absent')))); }
+        if(data.unanswered_prayers.length){ sections.push(section('Prayer requests needing an update','A quick check-in closes loops and builds trust.', data.unanswered_prayers.map(p=>row(p.submitted_by || 'Anonymous', p.request_text, 'prayer')))); }
+        if(data.nudges.length){ sections.push(section('Marge nudges','This is where the app earns its keep.', data.nudges.map(n=>row('Notice this', n, 'absent')))); }
 
-      const meta = document.createElement('div');
-      meta.className = 'context';
-      meta.textContent = context;
+        sections.forEach(s=>cards.appendChild(s));
+        if(!sections.length && currentMode==='live'){ emptyEl.classList.remove('hidden'); }
+      }catch(e){ errorEl.classList.remove('hidden'); aiBriefingEl.textContent='Could not load the briefing.'; }
+    }
 
-      main.append(strong, meta);
-
-      const actions = document.createElement('div');
-      actions.style.cssText = 'display:flex;gap:6px;align-items:center;flex-shrink:0;';
-      actions.appendChild(makeDraftButton(draftType, name));
-      if (careId) actions.appendChild(makeContactedButton(careId, row));
-
-      row.append(main, actions);
-      return row;
-    };
-
-    const makeCard = (title, description, rows, extraClass = '') => {
-      const card = document.createElement('section');
-      card.className = `card ${extraClass}`.trim();
-
-      const heading = document.createElement('h2');
-      heading.className = 'card-title';
-      heading.textContent = title;
-
-      card.appendChild(heading);
-
-      if (description) {
-        const desc = document.createElement('p');
-        desc.className = 'card-description';
-        desc.textContent = description;
-        card.appendChild(desc);
-      }
-
-      const list = document.createElement('div');
-      list.className = 'list';
-      rows.forEach((row) => list.appendChild(row));
-      card.appendChild(list);
-      return card;
-    };
-
-    const makeNudgeCard = (nudges) => {
-      const card = document.createElement('section');
-      card.className = 'card nudge';
-
-      const heading = document.createElement('h2');
-      heading.className = 'card-title';
-      heading.textContent = "💭 Today's Nudge";
-
-      const copy = document.createElement('div');
-      copy.className = 'nudge-copy';
-      copy.textContent = nudges.join(' ');
-
-      card.append(heading, copy);
-      return card;
-    };
-
-    const hasItems = (value) => Array.isArray(value) && value.length > 0;
-
-    const renderBriefing = (data) => {
-      greetingEl.textContent = data.greeting || 'Good morning.';
-      const pastorName = data.pastor_name || 'Pastor';
-      const churchName = data.church_name ? ` at ${data.church_name}` : '';
-      subheadEl.textContent = `Here’s a gentle look at who may need care and follow-up today, ${pastorName}${churchName}.`;
-
-      const sections = [];
-      const celebrations = [
-        ...(data.birthdays_this_week || []).map((person) =>
-          makeRow(person.full_name, `Birthday on ${formatDate(person.birthday)}.`, 'birthday')
-        ),
-        ...(data.anniversaries_this_week || []).map((person) =>
-          makeRow(person.full_name, `Anniversary on ${formatDate(person.anniversary)}.`, 'anniversary')
-        )
-      ];
-
-      if (celebrations.length) {
-        sections.push(makeCard(
-          '🎂 Birthdays & Anniversaries This Week',
-          'A few joyful moments worth remembering this week.',
-          celebrations
-        ));
-      }
-
-      if (hasItems(data.visitors_needing_followup)) {
-        sections.push(makeCard(
-          '👋 Visitors Needing Follow-Up',
-          'New faces may appreciate a warm word of welcome.',
-          data.visitors_needing_followup.map((visitor) =>
-            makeRow(visitor.full_name, `Visited on ${formatDate(visitor.visit_date)}. ${visitor.notes ? `Notes: ${visitor.notes}` : 'No additional notes.'}`, 'visitor')
-          )
-        ));
-      }
-
-      if (hasItems(data.active_care_cases)) {
-        sections.push(makeCard(
-          '🏥 Active Care Cases',
-          'Care needs already in motion that may merit a check-in.',
-          data.active_care_cases.map((person) => {
-            const details = [person.category, person.status, person.description, person.last_contact ? `Last contact ${formatDate(person.last_contact)}` : null]
-              .filter(Boolean)
-              .join(' • ');
-            return makeRow(person.member_name, details, 'hospital', person.id);
-          })
-        ));
-      }
-
-      if (hasItems(data.absent_members)) {
-        sections.push(makeCard(
-          '⏰ Members You Havent Seen in a While',
-          'A simple note can help someone feel remembered.',
-          data.absent_members.map((member) =>
-            makeRow(member.full_name, `Last attendance: ${formatDate(member.last_attendance)}.`, 'absent')
-          )
-        ));
-      }
-
-      if (hasItems(data.unanswered_prayers)) {
-        sections.push(makeCard(
-          '🙏 Prayer Requests Needing an Update',
-          'Requests that may benefit from a fresh touchpoint.',
-          data.unanswered_prayers.map((prayer) =>
-            makeRow(prayer.submitted_by || 'Anonymous', `${prayer.request_text}${prayer.status ? ` • Status: ${prayer.status}` : ''}`, 'prayer')
-          )
-        ));
-      }
-
-      if (hasItems(data.nudges)) {
-        sections.push(makeNudgeCard(data.nudges));
-      }
-
-      cards.innerHTML = '';
-      sections.forEach((section) => cards.appendChild(section));
-
-      loadingState.classList.add('hidden');
-      errorState.classList.add('hidden');
-
-      if (sections.length === 0) {
-        emptyState.classList.remove('hidden');
-        app.classList.add('hidden');
-        return;
-      }
-
-      emptyState.classList.add('hidden');
-      app.classList.remove('hidden');
-    };
-
-    const showError = () => {
-      loadingState.classList.add('hidden');
-      app.classList.add('hidden');
-      emptyState.classList.add('hidden');
-      errorState.classList.remove('hidden');
-    };
-
-    fetch(API_URL, { headers: { Accept: 'application/json' } })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
-      .then(renderBriefing)
-      .catch(showError);
+    loadBriefing();
   </script>
 </body>
 </html>
