@@ -43,7 +43,7 @@
     button, input, textarea { font: inherit; }
 
     .page {
-      width: min(1160px, calc(100% - 32px));
+      width: min(1240px, calc(100% - 32px));
       margin: 0 auto;
       padding: 42px 0 72px;
     }
@@ -154,6 +154,13 @@
       line-height: 1.5;
     }
 
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(340px, 0.9fr);
+      gap: 22px;
+      align-items: start;
+    }
+
     .cards {
       display: grid;
       gap: 22px;
@@ -196,13 +203,6 @@
       background: var(--accent-bg);
       color: var(--gold);
       font-weight: 700;
-    }
-
-    .queue-grid {
-      display: grid;
-      grid-template-columns: 1.15fr 0.85fr;
-      gap: 22px;
-      align-items: start;
     }
 
     .list {
@@ -275,7 +275,7 @@
       flex-wrap: wrap;
       justify-content: flex-end;
       gap: 8px;
-      max-width: 280px;
+      max-width: 320px;
     }
 
     .btn {
@@ -436,8 +436,7 @@
     .hidden { display: none !important; }
 
     .skeleton-hero,
-    .skeleton-card,
-    .skeleton-line {
+    .skeleton-card {
       position: relative;
       overflow: hidden;
       background: linear-gradient(90deg, rgba(255,255,255,0.45) 25%, rgba(255,255,255,0.82) 50%, rgba(255,255,255,0.45) 75%);
@@ -458,21 +457,13 @@
       background-color: rgba(176, 140, 74, 0.1);
     }
 
-    .skeleton-line {
-      height: 14px;
-      border-radius: 999px;
-      margin-bottom: 10px;
-      background-color: rgba(92, 122, 95, 0.08);
-    }
-
     @keyframes pulse {
       0% { background-position: 200% 0; }
       100% { background-position: -200% 0; }
     }
 
-    @media (max-width: 980px) {
-      .stats-strip,
-      .queue-grid { grid-template-columns: 1fr; }
+    @media (max-width: 1080px) {
+      .workspace-grid { grid-template-columns: 1fr; }
       .composer { position: static; }
     }
 
@@ -501,7 +492,7 @@
         <div class="skeleton-card"></div>
         <div class="skeleton-card"></div>
       </div>
-      <div class="queue-grid">
+      <div class="workspace-grid">
         <div class="cards">
           <div class="skeleton-card"></div>
           <div class="skeleton-card"></div>
@@ -527,7 +518,7 @@
 
       <section id="statsStrip" class="stats-strip"></section>
 
-      <section class="queue-grid">
+      <section class="workspace-grid">
         <div class="cards" id="mainColumn"></div>
         <aside class="cards composer" id="sideColumn"></aside>
       </section>
@@ -582,9 +573,9 @@
       birthday: (name) => `Draft a warm birthday text for ${name} from Pastor. Keep it brief, pastoral, and personal.`,
       anniversary: (name) => `Draft a warm anniversary note for ${name} from Pastor. Keep it grateful and pastoral.`,
       absent: (name) => `Draft a short caring text to ${name}. Let them know they have been missed and gently invite conversation if needed.`,
-      visitor: (name) => `Draft a warm visitor follow-up text for ${name}. Keep it gracious, welcoming, and pastoral.`,
+      visitor: (name) => `Prepare the visitor follow-up sequence for ${name}.`,
       prayer: (name) => `Draft a pastoral message checking in with ${name} about their prayer request and asking how things are now.`,
-      care: (name, context) => `Draft a pastoral care text for ${name}. Context: ${context || 'ongoing care need'}. Keep it warm, direct, and prayerful.`,
+      care: (name, context) => `Open or update a care case for ${name}. Context: ${context || 'ongoing care need'}. Also draft a pastoral message.`,
       queue: (name, context) => `Draft a warm pastoral follow-up for ${name}. Context: ${context || 'care follow-up'}. Keep it human, concise, and gentle.`
     };
 
@@ -653,6 +644,8 @@
           else if (action.type === 'care_case') item.textContent = `${action.status === 'opened' ? 'Opened' : 'Updated'} a ${action.category} care case for ${action.member_name}.`;
           else if (action.type === 'prayer_request') item.textContent = `Logged a prayer request for ${action.member_name}.`;
           else if (action.type === 'visitor_sequence') item.textContent = `Prepared the visitor follow-up sequence for ${action.visitor_name}.`;
+          else if (action.type === 'suggested_visitor_sequence') item.textContent = `Prepared sequence drafts for ${action.target_name}, but they still need a visitor record to be tracked.`;
+          else if (action.type === 'suggested_care_case') item.textContent = `Prepared a care draft for ${action.target_name}, but they still need a member record to track the case.`;
           else item.textContent = JSON.stringify(action);
           list.appendChild(item);
         });
@@ -710,7 +703,16 @@
       const response = await fetch(`${CARE_URL}${item.id}/contact`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ note: 'Contacted from the care queue.' })
+        body: JSON.stringify({ note: 'Contacted from the care tracker.' })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    };
+
+    const resolveCareItem = async (item) => {
+      const response = await fetch(`${CARE_URL}${item.id}/resolve`, {
+        method: 'POST',
+        headers: { Accept: 'application/json' }
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.json();
@@ -767,15 +769,17 @@
       const actions = document.createElement('div');
       actions.className = 'actions';
 
-      actions.appendChild(makeButton('Draft a text', 'btn-primary', async () => {
-        try {
-          const reply = await postChat(item.draftPrompt || draftTemplates.queue(item.title, item.context));
-          const responseContainer = document.getElementById('chatResponseWrap');
-          if (responseContainer) renderChatResult(responseContainer, reply);
-        } catch (error) {
-          alert('Marge could not draft that message just now.');
-        }
-      }));
+      if (item.draftPrompt) {
+        actions.appendChild(makeButton('Draft', 'btn-primary', async () => {
+          try {
+            const reply = await postChat(item.draftPrompt);
+            const responseContainer = document.getElementById('chatResponseWrap');
+            if (responseContainer) renderChatResult(responseContainer, reply);
+          } catch (error) {
+            alert('Marge could not draft that message just now.');
+          }
+        }));
+      }
 
       actions.appendChild(makeButton('Tell Marge', 'btn-soft', () => {
         const input = document.getElementById('chatInput');
@@ -785,21 +789,24 @@
         }
       }));
 
-      actions.appendChild(makeButton('Add note', 'btn-soft', () => {
-        const input = document.getElementById('chatInput');
-        if (input) {
-          input.value = `Add a note for ${item.title}: `;
-          input.focus();
-        }
-      }));
-
       if (item.markAction) {
-        actions.appendChild(makeButton('Mark contacted', 'btn-warm', async () => {
+        actions.appendChild(makeButton(item.markLabel || 'Mark contacted', 'btn-warm', async () => {
           try {
             await item.markAction(item);
             await refreshWorkspace();
           } catch (error) {
-            alert('I could not mark that update just now.');
+            alert('I could not update that just now.');
+          }
+        }));
+      }
+
+      if (item.resolveAction) {
+        actions.appendChild(makeButton('Resolve', 'btn-soft', async () => {
+          try {
+            await item.resolveAction(item);
+            await refreshWorkspace();
+          } catch (error) {
+            alert('I could not resolve that just now.');
           }
         }));
       }
@@ -808,9 +815,9 @@
       return row;
     };
 
-    const makeSectionCard = (title, description, items, refreshWorkspace, extraClass = '') => {
+    const makeSectionCard = (title, description, items, refreshWorkspace, emptyText) => {
       const card = document.createElement('section');
-      card.className = `card ${extraClass}`.trim();
+      card.className = 'card';
 
       const header = document.createElement('div');
       header.className = 'card-header';
@@ -834,9 +841,7 @@
       if (!items.length) {
         const empty = document.createElement('div');
         empty.className = 'warm-empty';
-        empty.textContent = title === 'Recently Resolved'
-          ? 'No recently resolved care notes are showing yet. When a loop closes, Marge can hold that gratitude here.'
-          : 'Nothing is sitting here right now. That is a gentle grace today.';
+        empty.textContent = emptyText || 'Nothing is sitting here right now. That is a gentle grace today.';
         card.appendChild(empty);
         return card;
       }
@@ -858,14 +863,14 @@
       return card;
     };
 
-    const makeComposerCard = (briefing) => {
+    const makeComposerCard = (briefing, snapshot) => {
       const card = document.createElement('section');
       card.className = 'card composer-card';
       card.innerHTML = `
         <div class="card-header">
           <div>
             <h2 class="card-title">Tell Marge</h2>
-            <p class="card-description">Log a visit, close a loop, or ask for help drafting the next text.</p>
+            <p class="card-description">Tell her what happened, and she should turn it into visible work: care, notes, sequences, and drafts.</p>
           </div>
         </div>
       `;
@@ -880,8 +885,8 @@
         actions: [],
         drafts: [],
         suggested_prompts: [
-          'Log a note for Martha Ellis: I visited her in the hospital and she is feeling stronger today.',
-          'Open a care case for David Park. He is anxious about surgery next week.',
+          'Log a note for Nathan Parikh: visited in the hospital today and doing better.',
+          'Open a care case for Martha Ellis. Hip surgery recovery and needs a check-in.',
           'Prepare the visitor follow-up sequence for James Whitmore.'
         ]
       });
@@ -896,7 +901,7 @@
 
       const hint = document.createElement('div');
       hint.className = 'composer-hint';
-      hint.textContent = `Today's briefing includes ${pluralize((briefing.active_care_cases || []).length, 'active care case')} and ${pluralize((briefing.visitors_needing_followup || []).length, 'visitor')} needing follow-up. Marge should log actions, prepare drafts, and surface what changed.`;
+      hint.textContent = `Today shows ${pluralize(snapshot.activeCare.length, 'active care case')}, ${pluralize(snapshot.visitorSequenceItems.length, 'visitor sequence')}, and ${pluralize(snapshot.outreachDraftItems.length, 'draft-ready person')} ready for action.`;
 
       const sendButton = makeButton('Send to Marge', 'btn-primary', async () => {
         const message = input.value.trim();
@@ -922,133 +927,142 @@
       return card;
     };
 
-    const buildQueue = ({ briefing, careCases, prayers, members, visitors }) => {
-      const today = [];
-      const overdue = [];
-      const active = [];
-      const resolved = [];
-
-      const addItem = (item) => {
-        if (item.group === 'resolved') resolved.push(item);
-        else if (item.group === 'overdue') overdue.push(item);
-        else if (item.group === 'today') today.push(item);
-        else active.push(item);
-      };
-
-      (careCases || []).forEach((care) => {
+    const buildSnapshot = ({ briefing, careCases, prayers, members, visitors }) => {
+      const activeCare = (careCases || []).filter((item) => item.status === 'active').map((care) => {
         const age = daysAgo(care.last_contact || care.created_at);
-        const isOverdue = age !== null && age > 7;
-        const isToday = age === null || age >= 5;
-        addItem({
+        const isOverdue = age === null || age > 7;
+        return {
           id: care.id,
           title: care.member_name || 'Care case',
           kindLabel: 'Care case',
-          timingLabel: isOverdue ? `${age} days since contact` : age === null ? 'Needs first touch' : age >= 0 ? `${age} days since contact` : 'In progress',
+          timingLabel: age === null ? 'Needs first touch' : `${age} days since contact`,
           context: stripText(care.description, 'Ongoing pastoral care need.'),
           meta: [care.category ? `Category: ${care.category}` : null, care.last_contact ? `Last contact ${formatDate(care.last_contact)}` : 'No contact logged yet'],
           isOverdue,
-          bucketClass: isOverdue ? 'overdue' : isToday ? 'today' : '',
-          group: isOverdue ? 'overdue' : isToday ? 'today' : 'active',
+          bucketClass: isOverdue ? 'overdue' : 'today',
           draftPrompt: draftTemplates.care(care.member_name || 'this person', care.description),
-          markAction: markCareContacted
-        });
+          markAction: markCareContacted,
+          markLabel: 'Log contact',
+          resolveAction: resolveCareItem
+        };
       });
 
-      (visitors || []).forEach((visitor) => {
-        const visitAge = daysAgo(visitor.visit_date);
-        let stage = null;
-        let timingLabel = 'In follow-up';
-        let group = 'active';
-        if (!visitor.follow_up_day1_sent) {
-          stage = 'day1';
-          timingLabel = visitAge > 0 ? `Day 1 follow-up is late` : 'Welcome today';
-          group = visitAge > 0 ? 'overdue' : 'today';
-        } else if (!visitor.follow_up_day3_sent && visitAge >= 3) {
-          stage = 'day3';
-          timingLabel = visitAge > 3 ? `Day 3 follow-up is late` : 'Follow-up due today';
-          group = visitAge > 3 ? 'overdue' : 'today';
-        } else if (!visitor.follow_up_week2_sent && visitAge >= 14) {
-          stage = 'week2';
-          timingLabel = visitAge > 14 ? `Two-week touch is late` : 'Two-week touch due today';
-          group = visitAge > 14 ? 'overdue' : 'today';
-        } else if (!(visitor.follow_up_day1_sent && visitor.follow_up_day3_sent && visitor.follow_up_week2_sent)) {
-          stage = visitor.follow_up_day3_sent ? 'week2' : 'day3';
-          timingLabel = `Visited ${formatDate(visitor.visit_date)}`;
-          group = 'active';
-        }
+      const resolvedCare = (careCases || []).filter((item) => item.status !== 'active').map((care) => ({
+        id: care.id,
+        title: care.member_name || 'Resolved care case',
+        kindLabel: 'Resolved care',
+        timingLabel: 'Closed',
+        context: stripText(care.description, 'A care loop was recently closed.'),
+        meta: [care.category ? `Category: ${care.category}` : null],
+        bucketClass: 'resolved'
+      }));
 
-        if (!stage) return;
-
-        addItem({
-          id: visitor.id,
-          title: visitor.full_name,
-          kindLabel: 'Visitor follow-up',
-          timingLabel,
-          context: stripText(visitor.notes, `Visited on ${formatDate(visitor.visit_date)}. A warm follow-up would help them feel remembered.`),
-          meta: [`Visit date ${formatDate(visitor.visit_date)}`, visitor.source ? `Source: ${visitor.source}` : null],
-          isOverdue: group === 'overdue',
-          bucketClass: group === 'overdue' ? 'overdue' : group === 'today' ? 'today' : '',
-          group,
-          stage,
-          draftPrompt: draftTemplates.visitor(visitor.full_name),
-          markAction: markVisitorContacted
-        });
-      });
-
-      (members || []).forEach((member) => {
-        const absenceDays = daysAgo(member.last_attendance);
-        if (absenceDays === null || absenceDays < 21) return;
-        const group = absenceDays > 35 ? 'overdue' : absenceDays >= 28 ? 'today' : 'active';
-        addItem({
-          id: member.id,
-          title: member.full_name,
-          kindLabel: 'Absent member',
-          timingLabel: `${absenceDays} days since attendance`,
-          context: `You have not seen ${member.full_name.split(' ')[0]} in a little while. A simple touch may help them feel remembered.`,
-          meta: [member.last_attendance ? `Last attended ${formatDate(member.last_attendance)}` : 'No attendance date available'],
-          isOverdue: group === 'overdue',
-          bucketClass: group === 'overdue' ? 'overdue' : group === 'today' ? 'today' : '',
-          group,
-          draftPrompt: draftTemplates.absent(member.full_name)
-        });
-      });
-
-      (prayers || []).forEach((prayer) => {
+      const prayerItems = (prayers || []).filter((prayer) => prayer.status === 'active' && (daysAgo(prayer.created_at || prayer.updated_at) || 0) >= 14).map((prayer) => {
         const prayerAge = daysAgo(prayer.created_at || prayer.updated_at);
-        if (prayer.status && prayer.status !== 'active') {
-          resolved.push({
-            id: prayer.id,
-            title: prayer.submitted_by || 'Prayer request',
-            kindLabel: 'Resolved prayer',
-            timingLabel: prayer.status === 'answered' ? 'Answered prayer' : 'Closed request',
-            context: stripText(prayer.request_text, 'A prayer loop was recently closed.'),
-            meta: [prayer.updated_at ? `Updated ${formatDate(prayer.updated_at)}` : null],
-            bucketClass: 'resolved',
-            group: 'resolved',
-            draftPrompt: draftTemplates.prayer(prayer.submitted_by || 'them')
-          });
-          return;
-        }
-        if (prayerAge !== null && prayerAge < 14) return;
-        const group = prayerAge > 21 ? 'overdue' : prayerAge >= 14 ? 'today' : 'active';
-        addItem({
+        return {
           id: prayer.id,
-          title: prayer.submitted_by || 'Prayer request',
+          title: prayer.submitted_by || prayer.member_name || 'Prayer request',
           kindLabel: 'Prayer follow-up',
-          timingLabel: prayerAge ? `${prayerAge} days since request` : 'Needs update',
+          timingLabel: `${prayerAge} days since request`,
           context: stripText(prayer.request_text, 'A prayer update may be due.'),
           meta: [prayer.is_private ? 'Private request' : 'Share carefully', prayer.created_at ? `Submitted ${formatDate(prayer.created_at)}` : null],
-          isOverdue: group === 'overdue',
-          bucketClass: group === 'overdue' ? 'overdue' : group === 'today' ? 'today' : '',
-          group,
-          draftPrompt: draftTemplates.prayer(prayer.submitted_by || 'them'),
-          markAction: markPrayerUpdated
-        });
+          isOverdue: prayerAge > 21,
+          bucketClass: prayerAge > 21 ? 'overdue' : 'today',
+          draftPrompt: draftTemplates.prayer(prayer.submitted_by || prayer.member_name || 'them'),
+          markAction: markPrayerUpdated,
+          markLabel: 'Mark answered'
+        };
       });
 
-      const sortByUrgency = (a, b) => a.title.localeCompare(b.title);
-      [today, overdue, active, resolved].forEach((group) => group.sort(sortByUrgency));
-      return { today, overdue, active, resolved };
+      const visitorSequenceItems = [];
+      (visitors || []).forEach((visitor) => {
+        const visitAge = daysAgo(visitor.visit_date);
+        if (!visitor.follow_up_day1_sent) {
+          visitorSequenceItems.push({
+            id: visitor.id,
+            title: visitor.full_name,
+            kindLabel: 'Visitor Day 1',
+            timingLabel: visitAge > 0 ? 'Day 1 is late' : 'Welcome today',
+            context: stripText(visitor.notes, `Visited on ${formatDate(visitor.visit_date)}. Start with a warm same-day welcome.`),
+            meta: [`Visit date ${formatDate(visitor.visit_date)}`, visitor.source ? `Source: ${visitor.source}` : null],
+            isOverdue: visitAge > 0,
+            bucketClass: visitAge > 0 ? 'overdue' : 'today',
+            stage: 'day1',
+            draftPrompt: `Prepare the visitor follow-up sequence for ${visitor.full_name}.`,
+            markAction: markVisitorContacted,
+            markLabel: 'Mark Day 1 sent'
+          });
+        }
+        if (visitor.follow_up_day1_sent && !visitor.follow_up_day3_sent && visitAge >= 3) {
+          visitorSequenceItems.push({
+            id: visitor.id,
+            title: visitor.full_name,
+            kindLabel: 'Visitor Day 3',
+            timingLabel: visitAge > 3 ? 'Day 3 is late' : 'Due today',
+            context: stripText(visitor.notes, `A second touch would help ${visitor.first_name} feel remembered.`),
+            meta: [`Visit date ${formatDate(visitor.visit_date)}`],
+            isOverdue: visitAge > 3,
+            bucketClass: visitAge > 3 ? 'overdue' : 'today',
+            stage: 'day3',
+            draftPrompt: `Prepare the visitor follow-up sequence for ${visitor.full_name}.`,
+            markAction: markVisitorContacted,
+            markLabel: 'Mark Day 3 sent'
+          });
+        }
+        if (visitor.follow_up_day1_sent && visitor.follow_up_day3_sent && !visitor.follow_up_week2_sent && visitAge >= 14) {
+          visitorSequenceItems.push({
+            id: visitor.id,
+            title: visitor.full_name,
+            kindLabel: 'Visitor Week 2',
+            timingLabel: visitAge > 14 ? 'Two-week follow-up is late' : 'Due today',
+            context: stripText(visitor.notes, `Invite ${visitor.first_name} back with a gentle personal touch.`),
+            meta: [`Visit date ${formatDate(visitor.visit_date)}`],
+            isOverdue: visitAge > 14,
+            bucketClass: visitAge > 14 ? 'overdue' : 'today',
+            stage: 'week2',
+            draftPrompt: `Prepare the visitor follow-up sequence for ${visitor.full_name}.`,
+            markAction: markVisitorContacted,
+            markLabel: 'Mark Week 2 sent'
+          });
+        }
+      });
+
+      const outreachDraftItems = [
+        ...((briefing.birthdays_this_week || []).map((person) => ({
+          title: person.full_name,
+          kindLabel: 'Birthday draft',
+          timingLabel: formatDate(person.birthday),
+          context: `${person.full_name.split(' ')[0]}'s birthday is coming this week.`,
+          meta: [person.phone ? 'Text-ready' : null],
+          draftPrompt: draftTemplates.birthday(person.full_name)
+        }))),
+        ...((briefing.anniversaries_this_week || []).map((person) => ({
+          title: person.full_name,
+          kindLabel: 'Anniversary draft',
+          timingLabel: formatDate(person.anniversary),
+          context: `A good day to bless ${person.full_name.split(' ')[0]} and celebrate their marriage.`,
+          meta: [person.phone ? 'Text-ready' : null],
+          draftPrompt: draftTemplates.anniversary(person.full_name)
+        }))),
+        ...((members || []).filter((member) => (daysAgo(member.last_attendance) || 0) >= 21).map((member) => ({
+          title: member.full_name,
+          kindLabel: 'Missed-you draft',
+          timingLabel: `${daysAgo(member.last_attendance)} days away`,
+          context: `You have not seen ${member.full_name.split(' ')[0]} in a little while. A simple touch may help them feel remembered.`,
+          meta: [member.last_attendance ? `Last attended ${formatDate(member.last_attendance)}` : 'No attendance date available'],
+          draftPrompt: draftTemplates.absent(member.full_name)
+        }))),
+        ...prayerItems.map((prayer) => ({
+          title: prayer.title,
+          kindLabel: 'Prayer update draft',
+          timingLabel: prayer.timingLabel,
+          context: prayer.context,
+          meta: prayer.meta,
+          draftPrompt: prayer.draftPrompt
+        }))
+      ];
+
+      return { activeCare, resolvedCare, prayerItems, visitorSequenceItems, outreachDraftItems };
     };
 
     const renderWorkspace = async () => {
@@ -1065,60 +1079,46 @@
       const churchName = briefing.church_name ? ` at ${briefing.church_name}` : '';
       subheadEl.textContent = `Here’s a gentle look at who may need care and follow-up today, ${pastorName}${churchName}.`;
 
+      const snapshot = buildSnapshot({ briefing, careCases, prayers, members, visitors });
+
       heroMetaEl.innerHTML = '';
       heroMetaEl.append(
         makeHeroPill('Generated', briefing.generated_at || 'Today'),
-        makeHeroPill('Care posture', 'Warm, present, attentive'),
-        makeHeroPill('Open loops', pluralize((careCases || []).filter((item) => item.status === 'active').length + (visitors || []).length, 'person'))
+        makeHeroPill('Tell Marge', 'Turns plain-English into visible work'),
+        makeHeroPill('Open loops', pluralize(snapshot.activeCare.length + snapshot.visitorSequenceItems.length + snapshot.prayerItems.length, 'person'))
       );
-
-      const queue = buildQueue({ briefing, careCases: (careCases || []).filter((item) => item.status === 'active'), prayers: prayers || [], members: members || [], visitors: visitors || [] });
 
       statsStripEl.innerHTML = '';
       statsStripEl.append(
-        makeStatCard('Visitors Needing Follow-Up', (visitors || []).filter((v) => !v.follow_up_day1_sent || !v.follow_up_day3_sent || !v.follow_up_week2_sent).length, 'New faces waiting on a thoughtful next touch.'),
-        makeStatCard('Active Care Cases', (careCases || []).filter((item) => item.status === 'active').length, 'Ongoing pastoral situations already in motion.'),
-        makeStatCard('Absent Members', (members || []).filter((member) => (daysAgo(member.last_attendance) || 0) >= 21).length, 'People you may want to gently check on.'),
-        makeStatCard('Prayer Requests Needing Update', (prayers || []).filter((prayer) => prayer.status === 'active' && (daysAgo(prayer.created_at || prayer.updated_at) || 0) >= 14).length, 'Requests that may need a fresh word or update.')
+        makeStatCard('Visitor Sequences', snapshot.visitorSequenceItems.length, 'People actively moving through follow-up, not just logged.'),
+        makeStatCard('Active Care & Crisis', snapshot.activeCare.length, 'Visible care cases with contact rhythm and resolution controls.'),
+        makeStatCard('Outreach Drafts', snapshot.outreachDraftItems.length, 'Ready-to-review drafts in Marge’s pastoral voice.'),
+        makeStatCard('Prayer Follow-Ups', snapshot.prayerItems.length, 'Requests that need a fresh update or closure.')
       );
 
       mainColumnEl.innerHTML = '';
       mainColumnEl.append(
-        makeSectionCard('Morning Briefing', 'Keep the shape of the morning in view before you step into the queue.', [
-          ...((briefing.birthdays_this_week || []).map((person) => ({
-            title: person.full_name,
-            kindLabel: 'Birthday',
-            timingLabel: formatDate(person.birthday),
-            context: `${person.full_name.split(' ')[0]}'s birthday is coming this week.`,
-            meta: [person.phone ? 'Text-ready' : null],
-            draftPrompt: draftTemplates.birthday(person.full_name),
-            bucketClass: '',
-            group: 'active'
-          }))),
-          ...((briefing.anniversaries_this_week || []).map((person) => ({
-            title: person.full_name,
-            kindLabel: 'Anniversary',
-            timingLabel: formatDate(person.anniversary),
-            context: `A good day to bless ${person.full_name.split(' ')[0]} and celebrate their marriage.`,
-            meta: [person.phone ? 'Text-ready' : null],
-            draftPrompt: draftTemplates.anniversary(person.full_name),
-            bucketClass: '',
-            group: 'active'
-          })))
-        ], renderWorkspace),
-        makeSectionCard('Due Today', 'These are the touches that would be especially good to make today.', queue.today, renderWorkspace),
-        makeSectionCard('Overdue', 'These items feel a little stale and may need gentle attention first.', queue.overdue, renderWorkspace),
-        makeSectionCard('Active Queue', 'Open care loops that are still in motion, even if they are not urgent today.', queue.active, renderWorkspace),
-        makeSectionCard('Recently Resolved', 'Closed loops and answered prayers can land here as gratitude accumulates.', queue.resolved, renderWorkspace)
+        makeSectionCard('Care & Crisis Tracker', 'Open pastoral care cases with visible next-touch rhythm and close-the-loop controls.', snapshot.activeCare, renderWorkspace, 'No active care cases are open right now.'),
+        makeSectionCard('Visitor Sequences', 'First-time visitor follow-up as a visible sequence instead of hidden fields.', snapshot.visitorSequenceItems, renderWorkspace, 'No visitor sequence steps are due right now.'),
+        makeSectionCard('Outreach Drafts in Your Voice', 'Birthday, anniversary, absence, and prayer follow-up drafts ready for review.', snapshot.outreachDraftItems, renderWorkspace, 'No outreach drafts are queued right now.'),
+        makeSectionCard('Recently Resolved', 'Closed care loops and resolved prayer updates that can stay visible for gratitude and memory.', [...snapshot.resolvedCare, ...(prayers || []).filter((prayer) => prayer.status !== 'active').map((prayer) => ({
+          id: prayer.id,
+          title: prayer.submitted_by || prayer.member_name || 'Prayer request',
+          kindLabel: prayer.status === 'answered' ? 'Answered prayer' : 'Closed prayer',
+          timingLabel: 'Resolved',
+          context: stripText(prayer.request_text, 'A prayer loop was recently closed.'),
+          meta: [prayer.updated_at ? `Updated ${formatDate(prayer.updated_at)}` : null],
+          bucketClass: 'resolved'
+        }))], renderWorkspace, 'No recently resolved items are showing yet.')
       );
 
       sideColumnEl.innerHTML = '';
-      sideColumnEl.append(makeComposerCard(briefing));
+      sideColumnEl.append(makeComposerCard(briefing, snapshot));
       if (Array.isArray(briefing.nudges) && briefing.nudges.length) {
         sideColumnEl.append(makeNudgeCard(briefing.nudges));
       }
 
-      const totalVisible = queue.today.length + queue.overdue.length + queue.active.length + queue.resolved.length + (briefing.birthdays_this_week || []).length + (briefing.anniversaries_this_week || []).length;
+      const totalVisible = snapshot.activeCare.length + snapshot.visitorSequenceItems.length + snapshot.outreachDraftItems.length + snapshot.prayerItems.length + snapshot.resolvedCare.length + (briefing.nudges || []).length;
       loadingState.classList.add('hidden');
       errorState.classList.add('hidden');
 
