@@ -349,6 +349,50 @@
       line-height: 1.65;
     }
 
+    .chat-meta {
+      display: grid;
+      gap: 12px;
+    }
+
+    .chat-block {
+      border: 1px solid rgba(92, 122, 95, 0.12);
+      background: rgba(255, 255, 255, 0.88);
+      border-radius: 16px;
+      padding: 14px;
+    }
+
+    .chat-block h3 {
+      font-size: 1rem;
+      margin-bottom: 8px;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .chat-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .draft-card {
+      border-radius: 14px;
+      padding: 12px;
+      background: rgba(250, 247, 242, 0.95);
+      border: 1px solid rgba(176, 140, 74, 0.14);
+      margin-top: 10px;
+    }
+
+    .draft-card strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .draft-text {
+      white-space: pre-wrap;
+      color: var(--charcoal);
+      line-height: 1.65;
+    }
+
     .chat-input {
       width: 100%;
       border: 1px solid rgba(92, 122, 95, 0.16);
@@ -586,6 +630,68 @@
       return response.json();
     };
 
+    const renderChatResult = (container, result) => {
+      container.innerHTML = '';
+
+      const reply = document.createElement('div');
+      reply.className = 'chat-response';
+      reply.textContent = result.reply || 'Marge has that noted.';
+      container.appendChild(reply);
+
+      const meta = document.createElement('div');
+      meta.className = 'chat-meta';
+
+      if (Array.isArray(result.actions) && result.actions.length) {
+        const block = document.createElement('div');
+        block.className = 'chat-block';
+        block.innerHTML = '<h3>What Marge did</h3>';
+        const list = document.createElement('ul');
+        list.className = 'chat-list';
+        result.actions.forEach((action) => {
+          const item = document.createElement('li');
+          if (action.type === 'member_note') item.textContent = `Logged a member note for ${action.member_name}.`;
+          else if (action.type === 'care_case') item.textContent = `${action.status === 'opened' ? 'Opened' : 'Updated'} a ${action.category} care case for ${action.member_name}.`;
+          else if (action.type === 'prayer_request') item.textContent = `Logged a prayer request for ${action.member_name}.`;
+          else if (action.type === 'visitor_sequence') item.textContent = `Prepared the visitor follow-up sequence for ${action.visitor_name}.`;
+          else item.textContent = JSON.stringify(action);
+          list.appendChild(item);
+        });
+        block.appendChild(list);
+        meta.appendChild(block);
+      }
+
+      if (Array.isArray(result.drafts) && result.drafts.length) {
+        const block = document.createElement('div');
+        block.className = 'chat-block';
+        block.innerHTML = '<h3>Drafts ready</h3>';
+        result.drafts.forEach((draft) => {
+          const card = document.createElement('div');
+          card.className = 'draft-card';
+          card.innerHTML = `<strong>${draft.member_name || draft.visitor_name || draft.type}</strong><div class="draft-text"></div>`;
+          card.querySelector('.draft-text').textContent = draft.draft;
+          block.appendChild(card);
+        });
+        meta.appendChild(block);
+      }
+
+      if (Array.isArray(result.suggested_prompts) && result.suggested_prompts.length) {
+        const block = document.createElement('div');
+        block.className = 'chat-block';
+        block.innerHTML = '<h3>Helpful next prompts</h3>';
+        const list = document.createElement('ul');
+        list.className = 'chat-list';
+        result.suggested_prompts.forEach((prompt) => {
+          const item = document.createElement('li');
+          item.textContent = prompt;
+          list.appendChild(item);
+        });
+        block.appendChild(list);
+        meta.appendChild(block);
+      }
+
+      if (meta.childNodes.length) container.appendChild(meta);
+    };
+
     const markVisitorContacted = async (item) => {
       const payload = {};
       if (item.stage === 'day1') payload.follow_up_day1_sent = true;
@@ -664,7 +770,8 @@
       actions.appendChild(makeButton('Draft a text', 'btn-primary', async () => {
         try {
           const reply = await postChat(item.draftPrompt || draftTemplates.queue(item.title, item.context));
-          alert(reply.reply || 'Draft ready in Marge chat.');
+          const responseContainer = document.getElementById('chatResponseWrap');
+          if (responseContainer) renderChatResult(responseContainer, reply);
         } catch (error) {
           alert('Marge could not draft that message just now.');
         }
@@ -766,10 +873,18 @@
       const shell = document.createElement('div');
       shell.className = 'chat-shell';
 
-      const responseBox = document.createElement('div');
-      responseBox.className = 'chat-response';
-      responseBox.id = 'chatResponse';
-      responseBox.textContent = `I'm here, Pastor. You can tell me about a visit, an answered prayer, or who needs a note today.`;
+      const responseWrap = document.createElement('div');
+      responseWrap.id = 'chatResponseWrap';
+      renderChatResult(responseWrap, {
+        reply: `I'm here, Pastor. You can tell me about a visit, an answered prayer, who is in the hospital, or ask me to prepare a follow-up sequence.`,
+        actions: [],
+        drafts: [],
+        suggested_prompts: [
+          'Log a note for Martha Ellis: I visited her in the hospital and she is feeling stronger today.',
+          'Open a care case for David Park. He is anxious about surgery next week.',
+          'Prepare the visitor follow-up sequence for James Whitmore.'
+        ]
+      });
 
       const input = document.createElement('textarea');
       input.className = 'chat-input';
@@ -781,7 +896,7 @@
 
       const hint = document.createElement('div');
       hint.className = 'composer-hint';
-      hint.textContent = `Today's briefing includes ${pluralize((briefing.active_care_cases || []).length, 'active care case')} and ${pluralize((briefing.visitors_needing_followup || []).length, 'visitor')} needing follow-up.`;
+      hint.textContent = `Today's briefing includes ${pluralize((briefing.active_care_cases || []).length, 'active care case')} and ${pluralize((briefing.visitors_needing_followup || []).length, 'visitor')} needing follow-up. Marge should log actions, prepare drafts, and surface what changed.`;
 
       const sendButton = makeButton('Send to Marge', 'btn-primary', async () => {
         const message = input.value.trim();
@@ -790,10 +905,11 @@
         sendButton.textContent = 'Sending…';
         try {
           const reply = await postChat(message);
-          responseBox.textContent = reply.reply || 'Marge has that noted.';
+          renderChatResult(responseWrap, reply);
           input.value = '';
+          await renderWorkspace();
         } catch (error) {
-          responseBox.textContent = 'I had trouble sending that to Marge just now. Please try again.';
+          renderChatResult(responseWrap, { reply: 'I had trouble sending that to Marge just now. Please try again.', actions: [], drafts: [], suggested_prompts: [] });
         } finally {
           sendButton.disabled = false;
           sendButton.textContent = 'Send to Marge';
@@ -801,7 +917,7 @@
       });
 
       actions.append(hint, sendButton);
-      shell.append(responseBox, input, actions);
+      shell.append(responseWrap, input, actions);
       card.appendChild(shell);
       return card;
     };
