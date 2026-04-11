@@ -1,0 +1,28 @@
+name: Content
+description: Content, social, email, landing page, or messaging task
+title: "[Content]: "
+labels: ["content", "ready"]
+body:
+  - type: textarea
+    id: audience
+    attributes:
+      label: Audience
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal / CTA
+    validations:
+      required: true
+  - type: textarea
+    id: angle
+    attributes:
+      label: Angle / message
+    validations:
+      required: true
+  - type: textarea
+    id: deliverable
+    attributes:
+      label: Deliverable
+      description: Thread, blog brief, landing page draft, email draft, etc.

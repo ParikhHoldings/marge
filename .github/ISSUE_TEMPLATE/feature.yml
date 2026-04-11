@@ -1,0 +1,31 @@
+name: Feature
+description: Product or engineering feature work
+title: "[Feature]: "
+labels: ["feature", "ready"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What needs to be built?
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / opportunity
+      description: What user or business problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Clear conditions for completion
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints / notes
+      description: Technical, product, or design constraints

@@ -1,0 +1,30 @@
+name: Growth Experiment
+description: Marketing, onboarding, SEO, or conversion experiment
+title: "[Growth]: "
+labels: ["marketing", "ready"]
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      description: What do we believe and why?
+    validations:
+      required: true
+  - type: textarea
+    id: metric
+    attributes:
+      label: Target metric
+      description: What metric should move?
+    validations:
+      required: true
+  - type: textarea
+    id: experiment
+    attributes:
+      label: Experiment plan
+      description: What will be changed or tested?
+    validations:
+      required: true
+  - type: textarea
+    id: success
+    attributes:
+      label: Success criteria

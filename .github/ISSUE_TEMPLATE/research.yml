@@ -1,0 +1,22 @@
+name: Research
+description: Research task
+title: "[Research]: "
+labels: ["research", "ready"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Research question
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Desired output
+      description: Memo, summary, competitor table, recommendation, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / notes
