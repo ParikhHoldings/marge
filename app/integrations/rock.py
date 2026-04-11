@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-ROCK_BASE = os.getenv("ROCK_BASE_URL", "https://rock.hbcfw.org/api/v2")
+ROCK_BASE = os.getenv("ROCK_BASE_URL", "https://rock.hbcfw.org/api")
 ROCK_API_KEY = os.getenv("ROCK_HALLMARK_API_KEY", "")
 
 # Reasonable timeouts for API calls
@@ -106,9 +106,12 @@ def fetch_active_members() -> List[dict]:
       GET /api/v2/People?$filter=RecordStatusValueId eq 3&$select=Id,FirstName,LastName,Email,PhoneNumbers,BirthDay,BirthMonth,BirthYear,AnniversaryDate
     """
     params = {
-        "$filter": f"RecordStatusValueId eq {ROCK_ACTIVE_RECORD_STATUS_ID}",
+        "$filter": (
+            f"RecordStatusValueId eq {ROCK_ACTIVE_RECORD_STATUS_ID} "
+            "and RecordTypeValueId eq 1 and IsDeceased eq false"
+        ),
         "$select": (
-            "Id,FirstName,LastName,Email,PhoneNumbers,"
+            "Id,FirstName,NickName,LastName,Email,PhoneNumbers,"
             "BirthDay,BirthMonth,BirthYear,AnniversaryDate"
         ),
         "$top": 1000,
@@ -131,8 +134,6 @@ def fetch_attendance_records(top: int = 500) -> List[dict]:
     params = {
         "$orderby": "StartDateTime desc",
         "$top": top,
-        "$select": "PersonAlias/PersonId,StartDateTime",
-        "$expand": "PersonAlias",
     }
     data = _get("Attendances", params)
     if data is None:
@@ -215,10 +216,12 @@ def sync_members_from_rock(db: Session) -> Dict[str, int]:
             existing.anniversary = _parse_rock_anniversary(person) or existing.anniversary
             stats["updated"] += 1
         else:
+            first_name = person.get("FirstName") or person.get("NickName") or "Unknown"
+            last_name = person.get("LastName") or ""
             member = Member(
                 rock_id=rock_id,
-                first_name=person.get("FirstName", "Unknown"),
-                last_name=person.get("LastName", ""),
+                first_name=first_name,
+                last_name=last_name,
                 email=person.get("Email"),
                 phone=_parse_rock_phone(person),
                 birthday=_parse_rock_birthday(person),
@@ -239,27 +242,47 @@ def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
     """
     Sync recent attendance records from Rock RMS and update Member.last_attendance.
 
-    Finds the most recent attendance date per person and writes it back to
-    the Member row. Only updates if the Rock date is more recent than what's stored.
+    Rock attendance rows often only include `PersonAliasId`, so this step resolves
+    aliases back to `PersonId` before updating local members.
 
     Args:
         db: SQLAlchemy session.
 
     Returns:
-        {"updated": N, "not_found": N}
+        {"updated": N, "not_found": N, "alias_resolved": N}
     """
     attendances = fetch_attendance_records()
     if not attendances:
         logger.info("No attendance records returned from Rock RMS.")
-        return {"updated": 0, "not_found": 0}
+        return {"updated": 0, "not_found": 0, "alias_resolved": 0}
 
-    # Build a dict: rock_person_id → most recent attendance date
+    alias_ids = sorted({record.get("PersonAliasId") for record in attendances if record.get("PersonAliasId")})
+    alias_to_person: Dict[str, str] = {}
+    alias_batches = 0
+
+    for i in range(0, len(alias_ids), 20):
+        batch = alias_ids[i:i + 20]
+        filter_expr = " or ".join([f"Id eq {alias_id}" for alias_id in batch])
+        data = _get("PersonAlias", {"$filter": filter_expr, "$top": len(batch)})
+        if data is None:
+            continue
+        alias_batches += 1
+        for alias in (data if isinstance(data, list) else data.get("value", [])):
+            if alias.get("Id") and alias.get("PersonId"):
+                alias_to_person[str(alias.get("Id"))] = str(alias.get("PersonId"))
+
     latest: Dict[str, date] = {}
     for record in attendances:
+        rock_person_id = ""
         person_alias = record.get("PersonAlias") or {}
-        rock_person_id = str(person_alias.get("PersonId", ""))
+        if person_alias.get("PersonId"):
+            rock_person_id = str(person_alias.get("PersonId", ""))
+        elif record.get("PersonAliasId"):
+            rock_person_id = alias_to_person.get(str(record.get("PersonAliasId")), "")
         raw_date = record.get("StartDateTime")
         if not rock_person_id or not raw_date:
+            continue
+        if record.get("DidAttend") is False:
             continue
         try:
             att_date = datetime.fromisoformat(raw_date[:10]).date()
@@ -268,7 +291,7 @@ def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
         if rock_person_id not in latest or att_date > latest[rock_person_id]:
             latest[rock_person_id] = att_date
 
-    stats = {"updated": 0, "not_found": 0}
+    stats = {"updated": 0, "not_found": 0, "alias_resolved": len(alias_to_person)}
 
     for rock_id, att_date in latest.items():
         member = db.query(Member).filter(Member.rock_id == rock_id).first()
@@ -281,8 +304,8 @@ def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
 
     db.commit()
     logger.info(
-        "Rock attendance sync: %d updated, %d not found in local DB.",
-        stats["updated"], stats["not_found"],
+        "Rock attendance sync: %d updated, %d not found in local DB, %d aliases resolved across %d batches.",
+        stats["updated"], stats["not_found"], stats["alias_resolved"], alias_batches,
     )
     return stats
 
