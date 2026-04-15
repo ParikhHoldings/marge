@@ -5,6 +5,7 @@
 - [#3] Clarify backup/restore, auth/onboarding, and privacy truth in product control docs.
 - [#4] Package Marge’s current user-facing workflows into a cleaner pilot demo/sales flow.
 - Align current active pilot-readiness work continuously with GitHub issue flow.
+- Run and record a production-like PostgreSQL restore drill (managed DB snapshot + pg_restore path) before first external pilot launch.
 
 ## Medium priority
 - Tighten UX rough edges discovered during staging review.
