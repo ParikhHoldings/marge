@@ -12,7 +12,7 @@ Tables:
 from datetime import datetime, date
 from sqlalchemy import (
     Column, Integer, String, Text, Date, DateTime,
-    Boolean, ForeignKey, Enum
+    Boolean, ForeignKey, Enum, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -44,7 +44,8 @@ class Member(Base):
     __tablename__ = "members"
 
     id = Column(Integer, primary_key=True, index=True)
-    rock_id = Column(String, nullable=True, index=True, unique=True)
+    church_id = Column(String, nullable=False, index=True)
+    rock_id = Column(String, nullable=True, index=True)
     first_name = Column(String, nullable=False)
     last_name = Column(String, nullable=False)
     email = Column(String, nullable=True)
@@ -58,6 +59,10 @@ class Member(Base):
     care_notes = relationship("CareNote", back_populates="member", cascade="all, delete-orphan")
     prayer_requests = relationship("PrayerRequest", back_populates="member", cascade="all, delete-orphan")
     notes = relationship("MemberNote", back_populates="member", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("church_id", "rock_id", name="uq_members_church_rock_id"),
+    )
 
     @property
     def full_name(self) -> str:
@@ -73,6 +78,7 @@ class Visitor(Base):
     __tablename__ = "visitors"
 
     id = Column(Integer, primary_key=True, index=True)
+    church_id = Column(String, nullable=False, index=True)
     first_name = Column(String, nullable=False)
     last_name = Column(String, nullable=False)
     email = Column(String, nullable=True)
@@ -107,6 +113,7 @@ class CareNote(Base):
     __tablename__ = "care_notes"
 
     id = Column(Integer, primary_key=True, index=True)
+    church_id = Column(String, nullable=False, index=True)
     member_id = Column(Integer, ForeignKey("members.id"), nullable=False)
     category = Column(
         Enum(CareCategoryEnum, values_callable=lambda x: [e.value for e in x]),
@@ -139,6 +146,7 @@ class PrayerRequest(Base):
     __tablename__ = "prayer_requests"
 
     id = Column(Integer, primary_key=True, index=True)
+    church_id = Column(String, nullable=False, index=True)
     member_id = Column(Integer, ForeignKey("members.id"), nullable=True)  # nullable for anonymous requests
     submitted_by = Column(String, nullable=True)  # name/label if member_id is None
     request_text = Column(Text, nullable=False)
@@ -168,6 +176,7 @@ class MemberNote(Base):
     __tablename__ = "member_notes"
 
     id = Column(Integer, primary_key=True, index=True)
+    church_id = Column(String, nullable=False, index=True)
     member_id = Column(Integer, ForeignKey("members.id"), nullable=False)
     note_text = Column(Text, nullable=False)
     context_tag = Column(String, nullable=True)

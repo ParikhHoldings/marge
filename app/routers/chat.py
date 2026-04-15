@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.auth import AuthContext, ROLE_ADMIN, ROLE_PASTOR, ROLE_STAFF, require_roles
 from app.models import Member, MemberNote, CareNote, PrayerRequest, Visitor
 from app.services.marge import (
     draft_care_message,
@@ -58,8 +59,8 @@ class ChatResponse(BaseModel):
     suggested_prompts: List[str] = []
 
 
-def _find_member_by_name(db: Session, text: str) -> Optional[Member]:
-    members = db.query(Member).all()
+def _find_member_by_name(db: Session, text: str, church_id: str) -> Optional[Member]:
+    members = db.query(Member).filter(Member.church_id == church_id).all()
     lowered = text.lower()
     best = None
     best_len = 0
@@ -71,8 +72,8 @@ def _find_member_by_name(db: Session, text: str) -> Optional[Member]:
     return best
 
 
-def _find_visitor_by_name(db: Session, text: str) -> Optional[Visitor]:
-    visitors = db.query(Visitor).all()
+def _find_visitor_by_name(db: Session, text: str, church_id: str) -> Optional[Visitor]:
+    visitors = db.query(Visitor).filter(Visitor.church_id == church_id).all()
     lowered = text.lower()
     best = None
     best_len = 0
@@ -126,7 +127,11 @@ def _extract_name_hint(message: str) -> Optional[str]:
 
 
 @router.post("/", response_model=ChatResponse, summary="Chat with Marge")
-def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
+def chat_with_marge(
+    request: ChatRequest,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_roles(ROLE_PASTOR, ROLE_ADMIN, ROLE_STAFF)),
+):
     pastor_name = os.getenv("PASTOR_NAME", request.pastor_name)
     church_name = os.getenv("CHURCH_NAME", "your church")
     message = request.message.strip()
@@ -136,19 +141,24 @@ def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
     drafts = []
     suggestions = []
 
-    member = _find_member_by_name(db, message)
-    visitor = _find_visitor_by_name(db, message)
+    member = _find_member_by_name(db, message, auth.church_id)
+    visitor = _find_visitor_by_name(db, message, auth.church_id)
     name_hint = _extract_name_hint(message)
 
     if member and any(word in lowered for word in ["visited", "called", "texted", "met with", "update", "log", "note"]):
-        note = MemberNote(member_id=member.id, note_text=message, context_tag=_infer_context_tag(message))
+        note = MemberNote(
+            member_id=member.id,
+            church_id=auth.church_id,
+            note_text=message,
+            context_tag=_infer_context_tag(message),
+        )
         db.add(note)
         actions.append({"type": "member_note", "member_id": member.id, "member_name": member.full_name, "status": "logged"})
 
     if member and any(word in lowered for word in ["hospital", "surgery", "icu"]):
         existing = (
             db.query(CareNote)
-            .filter(CareNote.member_id == member.id)
+            .filter(CareNote.member_id == member.id, CareNote.church_id == auth.church_id)
             .filter(CareNote.status == "active")
             .filter(CareNote.category == "hospital")
             .first()
@@ -158,7 +168,13 @@ def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
                 existing.description = ((existing.description or "") + f"\n\n[{date.today().isoformat()}] {message}").strip()
             actions.append({"type": "care_case", "member_id": member.id, "member_name": member.full_name, "category": "hospital", "status": "updated", "care_id": existing.id})
         else:
-            care = CareNote(member_id=member.id, category="hospital", status="active", description=message)
+            care = CareNote(
+                member_id=member.id,
+                church_id=auth.church_id,
+                category="hospital",
+                status="active",
+                description=message,
+            )
             db.add(care)
             db.flush()
             actions.append({"type": "care_case", "member_id": member.id, "member_name": member.full_name, "category": "hospital", "status": "opened", "care_id": care.id})
@@ -169,7 +185,14 @@ def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
         ])
 
     if member and any(word in lowered for word in ["prayer request", "pray for", "please pray", "prayer"]):
-        prayer = PrayerRequest(member_id=member.id, submitted_by=member.full_name, request_text=_extract_prayer_text(message), is_private=True, status="active")
+        prayer = PrayerRequest(
+            member_id=member.id,
+            church_id=auth.church_id,
+            submitted_by=member.full_name,
+            request_text=_extract_prayer_text(message),
+            is_private=True,
+            status="active",
+        )
         db.add(prayer)
         actions.append({"type": "prayer_request", "member_id": member.id, "member_name": member.full_name, "status": "opened"})
         suggestions.append("Do you want this prayer request kept private or visible in the internal list?")

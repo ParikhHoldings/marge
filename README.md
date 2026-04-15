@@ -58,6 +58,81 @@ Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to receive briefings v
 | GET | `/care/prayers/` | List prayer requests |
 | PATCH | `/care/prayers/{id}` | Update prayer status |
 
+## Authentication & Authorization
+
+All API routes are protected by default. These endpoints remain public:
+- `GET /`
+- `GET /health`
+- `/docs`, `/redoc`, `/openapi.json`
+
+### Required headers
+
+Use **one** of these authentication methods:
+
+1) JWT bearer token:
+```http
+Authorization: Bearer <jwt>
+```
+
+2) Session token:
+```http
+X-Session-Token: <token>
+```
+
+### JWT claims
+
+JWTs must include:
+- `sub` (or `user_id`)
+- `role`: one of `pastor`, `admin`, `staff`, `read-only`
+- `church_id` (or `tenant`)
+
+Optional verification controls:
+- `AUTH_JWT_SECRET` (required for JWT auth)
+- `AUTH_JWT_ALGORITHMS` (default: `HS256`)
+- `AUTH_JWT_ISSUER` (optional)
+- `AUTH_JWT_AUDIENCE` (optional)
+
+### Session token format (local/dev)
+
+Set `AUTH_SESSION_TOKENS` as comma-separated entries:
+```bash
+AUTH_SESSION_TOKENS="dev-pastor|pastor|hallmark|nathan,dev-staff|staff|hallmark|amy"
+```
+
+Each entry is:
+`token|role|church_id|user_id`
+
+### Role policy highlights
+
+- `pastor` / `admin`: full access across routes in their church tenant.
+- `staff`: standard read/write access, but cannot delete protected entities or access private prayer records.
+- `read-only`: GET/list endpoints only; write attempts are rejected with `403`.
+- Care endpoints are restricted to pastor/admin/staff only.
+- Private prayer records are restricted to pastor/admin only, with explicit `403` responses for unauthorized attempts.
+
+### Tenant scoping (`church_id`)
+
+All domain tables are tenant-scoped:
+- `members`
+- `visitors`
+- `care_notes`
+- `prayer_requests`
+- `member_notes`
+
+Every query path applies `church_id` filtering to prevent cross-church access.
+
+## Secret rotation guidance (production)
+
+1. Use a secret manager (Railway/Render/Cloud provider secret store), not plaintext files.
+2. Generate a new high-entropy `AUTH_JWT_SECRET`.
+3. Deploy with dual-token overlap window:
+   - begin issuing new JWTs with the new secret,
+   - allow old sessions to expire quickly,
+   - then remove the old secret.
+4. Rotate `AUTH_SESSION_TOKENS` at the same time (or disable static sessions in production).
+5. Set short JWT TTLs and re-authenticate privileged roles (`pastor`, `admin`) aggressively.
+6. Audit logs for 401/403 spikes during rollout.
+
 ## Rock RMS Integration
 
 Marge can sync members and attendance from Rock RMS automatically.

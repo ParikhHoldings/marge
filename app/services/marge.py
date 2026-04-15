@@ -28,7 +28,7 @@ NUDGE_LOOKBACK_DAYS = int(os.getenv("NUDGE_LOOKBACK_DAYS", "14"))
 
 # ── Morning Briefing ──────────────────────────────────────────────────────────
 
-def generate_morning_briefing(db: Session, pastor_name: str, church_name: str) -> dict:
+def generate_morning_briefing(db: Session, pastor_name: str, church_name: str, church_id: str) -> dict:
     """
     Generate today's pastoral briefing.
 
@@ -58,25 +58,25 @@ def generate_morning_briefing(db: Session, pastor_name: str, church_name: str) -
         "pastor_name": pastor_name,
         "church_name": church_name,
         "generated_at": datetime.utcnow().isoformat(),
-        "birthdays_this_week": _get_birthdays_this_week(db, today, week_end),
-        "anniversaries_this_week": _get_anniversaries_this_week(db, today, week_end),
-        "visitors_needing_followup": _get_visitors_needing_followup(db, today),
-        "active_care_cases": _get_active_care_cases(db, today),
-        "absent_members": _get_absent_members(db, today),
-        "unanswered_prayers": _get_unanswered_prayers(db, today),
-        "nudges": get_nudges(db),
+        "birthdays_this_week": _get_birthdays_this_week(db, today, week_end, church_id),
+        "anniversaries_this_week": _get_anniversaries_this_week(db, today, week_end, church_id),
+        "visitors_needing_followup": _get_visitors_needing_followup(db, today, church_id),
+        "active_care_cases": _get_active_care_cases(db, today, church_id),
+        "absent_members": _get_absent_members(db, today, church_id),
+        "unanswered_prayers": _get_unanswered_prayers(db, today, church_id),
+        "nudges": get_nudges(db, church_id),
     }
 
     return briefing
 
 
-def _get_birthdays_this_week(db: Session, today: date, week_end: date) -> List[Member]:
+def _get_birthdays_this_week(db: Session, today: date, week_end: date, church_id: str) -> List[Member]:
     """
     Return Members whose birthday falls within the next BIRTHDAY_LOOKAHEAD_DAYS days.
 
     Compares month+day only (year-agnostic).
     """
-    members = db.query(Member).filter(Member.birthday.isnot(None)).all()
+    members = db.query(Member).filter(Member.church_id == church_id, Member.birthday.isnot(None)).all()
     result = []
     for m in members:
         bday = m.birthday
@@ -99,11 +99,11 @@ def _get_birthdays_this_week(db: Session, today: date, week_end: date) -> List[M
     return result
 
 
-def _get_anniversaries_this_week(db: Session, today: date, week_end: date) -> List[Member]:
+def _get_anniversaries_this_week(db: Session, today: date, week_end: date, church_id: str) -> List[Member]:
     """
     Return Members whose wedding anniversary falls within the next BIRTHDAY_LOOKAHEAD_DAYS days.
     """
-    members = db.query(Member).filter(Member.anniversary.isnot(None)).all()
+    members = db.query(Member).filter(Member.church_id == church_id, Member.anniversary.isnot(None)).all()
     result = []
     for m in members:
         ann = m.anniversary
@@ -116,7 +116,7 @@ def _get_anniversaries_this_week(db: Session, today: date, week_end: date) -> Li
     return result
 
 
-def _get_visitors_needing_followup(db: Session, today: date) -> List[Visitor]:
+def _get_visitors_needing_followup(db: Session, today: date, church_id: str) -> List[Visitor]:
     """
     Return Visitors where:
       - visit_date was at least VISITOR_FOLLOWUP_DELAY_HOURS ago
@@ -125,6 +125,7 @@ def _get_visitors_needing_followup(db: Session, today: date) -> List[Visitor]:
     cutoff = today - timedelta(hours=VISITOR_FOLLOWUP_DELAY_HOURS / 24)
     return (
         db.query(Visitor)
+        .filter(Visitor.church_id == church_id)
         .filter(Visitor.visit_date <= cutoff)
         .filter(Visitor.follow_up_day1_sent == False)  # noqa: E712
         .order_by(Visitor.visit_date)
@@ -132,7 +133,7 @@ def _get_visitors_needing_followup(db: Session, today: date) -> List[Visitor]:
     )
 
 
-def _get_active_care_cases(db: Session, today: date) -> List[CareNote]:
+def _get_active_care_cases(db: Session, today: date, church_id: str) -> List[CareNote]:
     """
     Return CareNotes where:
       - status = 'active'
@@ -141,6 +142,7 @@ def _get_active_care_cases(db: Session, today: date) -> List[CareNote]:
     cutoff = today - timedelta(days=CARE_OVERDUE_DAYS)
     return (
         db.query(CareNote)
+        .filter(CareNote.church_id == church_id)
         .filter(CareNote.status == "active")
         .filter(
             (CareNote.last_contact == None) |  # noqa: E711
@@ -151,7 +153,7 @@ def _get_active_care_cases(db: Session, today: date) -> List[CareNote]:
     )
 
 
-def _get_absent_members(db: Session, today: date) -> List[Member]:
+def _get_absent_members(db: Session, today: date, church_id: str) -> List[Member]:
     """
     Return Members where last_attendance was more than ABSENCE_THRESHOLD_DAYS ago.
 
@@ -162,6 +164,7 @@ def _get_absent_members(db: Session, today: date) -> List[Member]:
     cutoff = today - timedelta(days=ABSENCE_THRESHOLD_DAYS)
     return (
         db.query(Member)
+        .filter(Member.church_id == church_id)
         .filter(Member.last_attendance.isnot(None))
         .filter(Member.last_attendance < cutoff)
         .order_by(Member.last_attendance.asc())
@@ -169,7 +172,7 @@ def _get_absent_members(db: Session, today: date) -> List[Member]:
     )
 
 
-def _get_unanswered_prayers(db: Session, today: date) -> List[PrayerRequest]:
+def _get_unanswered_prayers(db: Session, today: date, church_id: str) -> List[PrayerRequest]:
     """
     Return PrayerRequests that are:
       - status = 'active'
@@ -178,6 +181,7 @@ def _get_unanswered_prayers(db: Session, today: date) -> List[PrayerRequest]:
     cutoff = datetime.utcnow() - timedelta(days=PRAYER_OVERDUE_DAYS)
     return (
         db.query(PrayerRequest)
+        .filter(PrayerRequest.church_id == church_id)
         .filter(PrayerRequest.status == "active")
         .filter(PrayerRequest.created_at < cutoff)
         .order_by(PrayerRequest.created_at.asc())
@@ -283,7 +287,7 @@ def draft_care_message(
 
 # ── Proactive Nudges ──────────────────────────────────────────────────────────
 
-def get_nudges(db: Session) -> List[str]:
+def get_nudges(db: Session, church_id: str) -> List[str]:
     """
     Return a list of proactive nudge strings for the morning briefing.
 
@@ -312,6 +316,7 @@ def get_nudges(db: Session) -> List[str]:
     # Get the most recent note per member
     recent_notes = (
         db.query(MemberNote)
+        .filter(MemberNote.church_id == church_id)
         .filter(MemberNote.created_at < cutoff)
         .filter(MemberNote.context_tag.isnot(None))
         .order_by(MemberNote.created_at.desc())

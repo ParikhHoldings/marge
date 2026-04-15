@@ -1,14 +1,4 @@
-"""
-Visitors router — CRUD + follow-up draft generation.
-
-Endpoints:
-  POST   /visitors/             Create a new visitor record
-  GET    /visitors/             List all visitors (paginated)
-  GET    /visitors/{id}         Get a specific visitor
-  PATCH  /visitors/{id}         Update visitor (mark follow-up sent, add notes, etc.)
-  DELETE /visitors/{id}         Delete a visitor record
-  GET    /visitors/{id}/draft   Get a pre-written follow-up message draft
-"""
+"""Visitors router — CRUD + follow-up draft generation."""
 
 import os
 from typing import List, Optional
@@ -18,13 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.auth import AuthContext, ROLE_ADMIN, ROLE_PASTOR, ROLE_READ_ONLY, ROLE_STAFF, require_roles
 from app.database import get_db
 from app.models import Visitor
 from app.services.marge import draft_visitor_followup
 
 router = APIRouter(prefix="/visitors", tags=["visitors"])
-
-# ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 
 class VisitorCreate(BaseModel):
@@ -76,18 +65,13 @@ class DraftResponse(BaseModel):
     draft: str
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-
 @router.post("/", response_model=VisitorResponse, status_code=201, summary="Log a new visitor")
-def create_visitor(visitor_in: VisitorCreate, db: Session = Depends(get_db)):
-    """
-    Log a first-time (or repeat) visitor.
-
-    Marge will automatically surface this visitor in the morning briefing
-    once 48 hours have passed and no follow-up has been sent.
-    """
-    visitor = Visitor(**visitor_in.model_dump())
+def create_visitor(
+    visitor_in: VisitorCreate,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_roles(ROLE_PASTOR, ROLE_ADMIN, ROLE_STAFF)),
+):
+    visitor = Visitor(**visitor_in.model_dump(), church_id=auth.church_id)
     db.add(visitor)
     db.commit()
     db.refresh(visitor)
@@ -100,36 +84,34 @@ def list_visitors(
     limit: int = Query(50, ge=1, le=200),
     needs_followup: bool = Query(False, description="Filter to visitors needing Day-1 follow-up"),
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_roles(ROLE_PASTOR, ROLE_ADMIN, ROLE_STAFF, ROLE_READ_ONLY)),
 ):
-    """
-    List all visitors, optionally filtered to those needing follow-up.
-    """
-    query = db.query(Visitor)
+    query = db.query(Visitor).filter(Visitor.church_id == auth.church_id)
     if needs_followup:
         cutoff = date.today()
-        query = query.filter(
-            Visitor.visit_date <= cutoff,
-            Visitor.follow_up_day1_sent == False,  # noqa: E712
-        )
+        query = query.filter(Visitor.visit_date <= cutoff, Visitor.follow_up_day1_sent == False)  # noqa: E712
     visitors = query.order_by(Visitor.visit_date.desc()).offset(skip).limit(limit).all()
     return [_to_response(v) for v in visitors]
 
 
 @router.get("/{visitor_id}", response_model=VisitorResponse, summary="Get a visitor")
-def get_visitor(visitor_id: int, db: Session = Depends(get_db)):
-    """Retrieve a single visitor record by ID."""
-    visitor = _get_or_404(db, visitor_id)
+def get_visitor(
+    visitor_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_roles(ROLE_PASTOR, ROLE_ADMIN, ROLE_STAFF, ROLE_READ_ONLY)),
+):
+    visitor = _get_or_404(db, visitor_id, auth.church_id)
     return _to_response(visitor)
 
 
 @router.patch("/{visitor_id}", response_model=VisitorResponse, summary="Update a visitor")
-def update_visitor(visitor_id: int, update: VisitorUpdate, db: Session = Depends(get_db)):
-    """
-    Update visitor details or mark a follow-up step as sent.
-
-    Example: mark Day-1 follow-up as sent after the pastor sends the text.
-    """
-    visitor = _get_or_404(db, visitor_id)
+def update_visitor(
+    visitor_id: int,
+    update: VisitorUpdate,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_roles(ROLE_PASTOR, ROLE_ADMIN, ROLE_STAFF)),
+):
+    visitor = _get_or_404(db, visitor_id, auth.church_id)
     for field, value in update.model_dump(exclude_unset=True).items():
         setattr(visitor, field, value)
     db.commit()
@@ -138,56 +120,33 @@ def update_visitor(visitor_id: int, update: VisitorUpdate, db: Session = Depends
 
 
 @router.delete("/{visitor_id}", status_code=204, summary="Delete a visitor record")
-def delete_visitor(visitor_id: int, db: Session = Depends(get_db)):
-    """Delete a visitor record. Use when a visitor becomes a member or was entered in error."""
-    visitor = _get_or_404(db, visitor_id)
+def delete_visitor(
+    visitor_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_roles(ROLE_PASTOR, ROLE_ADMIN)),
+):
+    visitor = _get_or_404(db, visitor_id, auth.church_id)
     db.delete(visitor)
     db.commit()
 
 
-@router.get(
-    "/{visitor_id}/draft",
-    response_model=DraftResponse,
-    summary="Get a follow-up message draft for a visitor",
-)
+@router.get("/{visitor_id}/draft", response_model=DraftResponse, summary="Get a follow-up message draft for a visitor")
 def get_visitor_draft(
     visitor_id: int,
     day: int = Query(1, description="Follow-up day: 1 (text), 3 (email), 14 (invitation)"),
     db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_roles(ROLE_PASTOR, ROLE_ADMIN, ROLE_STAFF)),
 ):
-    """
-    Generate a warm, pastoral follow-up message draft for a visitor.
-
-    day=1  → Same-day welcome text (sent after the visit)
-    day=3  → 3-day email follow-up
-    day=14 → Two-week invitation to return
-
-    The pastor reviews the draft and sends it — Marge never sends automatically.
-    """
-    visitor = _get_or_404(db, visitor_id)
+    visitor = _get_or_404(db, visitor_id, auth.church_id)
     pastor_name = os.getenv("PASTOR_NAME", "Pastor")
     church_name = os.getenv("CHURCH_NAME", "our church")
 
-    draft = draft_visitor_followup(
-        visitor=visitor,
-        day=day,
-        pastor_name=pastor_name,
-        church_name=church_name,
-    )
-
-    return DraftResponse(
-        visitor_id=visitor.id,
-        visitor_name=visitor.full_name,
-        day=day,
-        draft=draft,
-    )
+    draft = draft_visitor_followup(visitor=visitor, day=day, pastor_name=pastor_name, church_name=church_name)
+    return DraftResponse(visitor_id=visitor.id, visitor_name=visitor.full_name, day=day, draft=draft)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _get_or_404(db: Session, visitor_id: int) -> Visitor:
-    visitor = db.query(Visitor).filter(Visitor.id == visitor_id).first()
+def _get_or_404(db: Session, visitor_id: int, church_id: str) -> Visitor:
+    visitor = db.query(Visitor).filter(Visitor.id == visitor_id, Visitor.church_id == church_id).first()
     if not visitor:
         raise HTTPException(status_code=404, detail="Visitor not found")
     return visitor
