@@ -29,3 +29,14 @@ Marge is active, real, revenue-adjacent, and mature enough to validate the syste
 
 ### Impact
 Lessons from this rollout should shape the standard before propagation to SundayEngine, Nexdo, and FDD Tracker.
+
+## 2026-04-15 - Set explicit backup/recovery SLOs and quarterly restore drills
+### Decision
+Pilot and production environments now have explicit RPO/RTO targets, automated backups with retention policy, and a recurring quarterly restore drill requirement.
+
+### Why
+Pastoral care workflows need predictable recovery guarantees to avoid losing sensitive follow-up state and trust-critical care history.
+
+### Impact
+Operations now include scripted backup/restore commands, documented encryption/secret-management responsibilities, and quarterly ownership for restore rehearsals.
+

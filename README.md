@@ -34,6 +34,25 @@ python3 scripts/morning_briefing.py
 
 Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to receive briefings via Telegram.
 
+## Database Backup & Restore
+
+```bash
+# Create backup (pilot defaults)
+python3 scripts/db_backup.py --environment pilot
+
+# Restore from backup
+python3 scripts/db_restore.py --backup-file <path/to/backup> --database-url sqlite:///./marge.db --force
+
+# Rehearse restore + integrity checks in staging
+python3 scripts/rehearse_restore.py --environment pilot
+```
+
+Backup retention controls (via env vars):
+- `DB_BACKUP_DIR` (default `backups`)
+- `DB_BACKUP_RETENTION_DAYS_PILOT` (default `14`)
+- `DB_BACKUP_RETENTION_DAYS_PRODUCTION` (default `35`)
+- `DB_BACKUP_KEEP_MIN` (default `10`)
+
 ## API Endpoints
 
 | Method | Endpoint | Description |
