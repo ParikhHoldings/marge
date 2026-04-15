@@ -38,6 +38,12 @@ class PrayerStatusEnum(str, enum.Enum):
     expired = "expired"
 
 
+class ConfidentialityClassEnum(str, enum.Enum):
+    public = "public"
+    private = "private"
+    sensitive = "sensitive"
+
+
 class Member(Base):
     """A congregation member. May be synced from Rock RMS via rock_id."""
 
@@ -119,6 +125,11 @@ class CareNote(Base):
         default=CareStatusEnum.active,
     )
     description = Column(Text, nullable=True)
+    confidentiality_class = Column(
+        Enum(ConfidentialityClassEnum, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=ConfidentialityClassEnum.private,
+    )
     last_contact = Column(Date, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -143,6 +154,11 @@ class PrayerRequest(Base):
     submitted_by = Column(String, nullable=True)  # name/label if member_id is None
     request_text = Column(Text, nullable=False)
     is_private = Column(Boolean, default=False)
+    confidentiality_class = Column(
+        Enum(ConfidentialityClassEnum, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=ConfidentialityClassEnum.public,
+    )
     status = Column(
         Enum(PrayerStatusEnum, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
@@ -171,6 +187,11 @@ class MemberNote(Base):
     member_id = Column(Integer, ForeignKey("members.id"), nullable=False)
     note_text = Column(Text, nullable=False)
     context_tag = Column(String, nullable=True)
+    confidentiality_class = Column(
+        Enum(ConfidentialityClassEnum, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=ConfidentialityClassEnum.private,
+    )
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

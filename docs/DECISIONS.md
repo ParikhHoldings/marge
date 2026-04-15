@@ -1,5 +1,15 @@
 # Decisions
 
+## 2026-04-15 - Adopt explicit confidentiality classes and role-aware redaction across pastoral records
+### Decision
+Prayer requests, care cases, and member notes now carry a required `confidentiality_class` value aligned to policy (`public`, `private`, `sensitive`). API mappers and chat-derived action payloads now redact private/sensitive text for lower-privilege roles.
+
+### Why
+The prior `is_private` boolean on prayer requests was insufficiently expressive and left room for accidental data promotion in multi-output surfaces. We needed policy-aligned classes and consistent read/write/update behavior across care, prayer, notes, and chat workflows.
+
+### Impact
+Public-facing outputs (briefing public audience, prayer bulletin, export audience=public) are now guarded and only include explicitly public records. Conformance tests now cover privacy behavior for create/read/update flows and chat-derived actions.
+
 ## 2026-04-10 - Use durable PostgreSQL instead of SQLite for Railway environments
 ### Decision
 Staging and production should both use PostgreSQL-backed `DATABASE_URL` values rather than SQLite on Railway.

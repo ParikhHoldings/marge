@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Member, MemberNote, CareNote, PrayerRequest, Visitor
+from app.privacy import AccessRole, ConfidentialityClass, get_request_role, redact_for_role
 from app.services.marge import (
     draft_care_message,
     draft_visitor_followup,
@@ -125,8 +126,21 @@ def _extract_name_hint(message: str) -> Optional[str]:
     return None
 
 
+def _infer_confidentiality(message: str, default: ConfidentialityClass = ConfidentialityClass.private) -> ConfidentialityClass:
+    lowered = message.lower()
+    if any(word in lowered for word in ["counsel", "therapy", "abuse", "financial", "conflict", "icu", "suicide"]):
+        return ConfidentialityClass.sensitive
+    if any(word in lowered for word in ["public", "bulletin", "share church-wide"]):
+        return ConfidentialityClass.public
+    return default
+
+
 @router.post("/", response_model=ChatResponse, summary="Chat with Marge")
-def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
+def chat_with_marge(
+    request: ChatRequest,
+    db: Session = Depends(get_db),
+    role: AccessRole = Depends(get_request_role),
+):
     pastor_name = os.getenv("PASTOR_NAME", request.pastor_name)
     church_name = os.getenv("CHURCH_NAME", "your church")
     message = request.message.strip()
@@ -141,9 +155,22 @@ def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
     name_hint = _extract_name_hint(message)
 
     if member and any(word in lowered for word in ["visited", "called", "texted", "met with", "update", "log", "note"]):
-        note = MemberNote(member_id=member.id, note_text=message, context_tag=_infer_context_tag(message))
+        note_confidentiality = _infer_confidentiality(message, ConfidentialityClass.private)
+        note = MemberNote(
+            member_id=member.id,
+            note_text=message,
+            context_tag=_infer_context_tag(message),
+            confidentiality_class=note_confidentiality.value,
+        )
         db.add(note)
-        actions.append({"type": "member_note", "member_id": member.id, "member_name": member.full_name, "status": "logged"})
+        actions.append({
+            "type": "member_note",
+            "member_id": member.id,
+            "member_name": member.full_name,
+            "status": "logged",
+            "confidentiality_class": note_confidentiality.value,
+            "note_text": redact_for_role(message, note_confidentiality, role),
+        })
 
     if member and any(word in lowered for word in ["hospital", "surgery", "icu"]):
         existing = (
@@ -154,14 +181,44 @@ def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
             .first()
         )
         if existing:
+            existing_confidentiality = (
+                existing.confidentiality_class.value
+                if hasattr(existing.confidentiality_class, "value")
+                else existing.confidentiality_class
+            )
             if message not in (existing.description or ""):
                 existing.description = ((existing.description or "") + f"\n\n[{date.today().isoformat()}] {message}").strip()
-            actions.append({"type": "care_case", "member_id": member.id, "member_name": member.full_name, "category": "hospital", "status": "updated", "care_id": existing.id})
+            actions.append({
+                "type": "care_case",
+                "member_id": member.id,
+                "member_name": member.full_name,
+                "category": "hospital",
+                "status": "updated",
+                "care_id": existing.id,
+                "confidentiality_class": existing_confidentiality,
+                "description": redact_for_role(message, existing_confidentiality, role),
+            })
         else:
-            care = CareNote(member_id=member.id, category="hospital", status="active", description=message)
+            care_confidentiality = _infer_confidentiality(message, ConfidentialityClass.sensitive)
+            care = CareNote(
+                member_id=member.id,
+                category="hospital",
+                status="active",
+                description=message,
+                confidentiality_class=care_confidentiality.value,
+            )
             db.add(care)
             db.flush()
-            actions.append({"type": "care_case", "member_id": member.id, "member_name": member.full_name, "category": "hospital", "status": "opened", "care_id": care.id})
+            actions.append({
+                "type": "care_case",
+                "member_id": member.id,
+                "member_name": member.full_name,
+                "category": "hospital",
+                "status": "opened",
+                "care_id": care.id,
+                "confidentiality_class": care_confidentiality.value,
+                "description": redact_for_role(message, care_confidentiality, role),
+            })
         drafts.append({"type": "care_text", "member_id": member.id, "member_name": member.full_name, "draft": draft_care_message(member, "hospital", pastor_name)})
         suggestions.extend([
             f"Would you like me to log when you last contacted {member.first_name}?",
@@ -169,9 +226,24 @@ def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
         ])
 
     if member and any(word in lowered for word in ["prayer request", "pray for", "please pray", "prayer"]):
-        prayer = PrayerRequest(member_id=member.id, submitted_by=member.full_name, request_text=_extract_prayer_text(message), is_private=True, status="active")
+        prayer_confidentiality = _infer_confidentiality(message, ConfidentialityClass.private)
+        prayer = PrayerRequest(
+            member_id=member.id,
+            submitted_by=member.full_name,
+            request_text=_extract_prayer_text(message),
+            is_private=True,
+            confidentiality_class=prayer_confidentiality.value,
+            status="active",
+        )
         db.add(prayer)
-        actions.append({"type": "prayer_request", "member_id": member.id, "member_name": member.full_name, "status": "opened"})
+        actions.append({
+            "type": "prayer_request",
+            "member_id": member.id,
+            "member_name": member.full_name,
+            "status": "opened",
+            "confidentiality_class": prayer_confidentiality.value,
+            "request_text": redact_for_role(prayer.request_text, prayer_confidentiality, role),
+        })
         suggestions.append("Do you want this prayer request kept private or visible in the internal list?")
 
     if visitor and any(word in lowered for word in ["visitor", "visited", "follow up", "follow-up", "came sunday", "came last sunday", "prepare", "sequence", "draft"]):

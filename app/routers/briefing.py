@@ -9,11 +9,12 @@ import os
 from typing import List, Optional, Any
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.privacy import AccessRole, ConfidentialityClass, assert_public_only, get_request_role, redact_for_role
 from app.services.marge import generate_morning_briefing, render_briefing_text
 
 router = APIRouter(prefix="/briefing", tags=["briefing"])
@@ -54,6 +55,7 @@ class CareBrief(BaseModel):
     category: str
     status: str
     description: Optional[str] = None
+    confidentiality_class: ConfidentialityClass
     last_contact: Optional[date] = None
     created_at: datetime
 
@@ -67,6 +69,7 @@ class PrayerBrief(BaseModel):
     submitted_by: Optional[str] = None
     request_text: str
     is_private: bool
+    confidentiality_class: ConfidentialityClass
     status: str
     created_at: datetime
 
@@ -93,7 +96,11 @@ class BriefingResponse(BaseModel):
 
 
 @router.get("/today", response_model=BriefingResponse, summary="Get today's morning briefing")
-def get_today_briefing(db: Session = Depends(get_db)):
+def get_today_briefing(
+    audience: str = Query("internal", pattern="^(internal|public)$"),
+    db: Session = Depends(get_db),
+    role: AccessRole = Depends(get_request_role),
+):
     """
     Generate and return Marge's morning briefing for today.
 
@@ -136,27 +143,45 @@ def get_today_briefing(db: Session = Depends(get_db)):
         }
 
     def care_to_brief(c) -> dict:
+        confidentiality = c.confidentiality_class.value if hasattr(c.confidentiality_class, "value") else c.confidentiality_class
         return {
             "id": c.id,
             "member_id": c.member_id,
             "member_name": c.member.full_name if c.member else None,
             "category": c.category.value if hasattr(c.category, "value") else c.category,
             "status": c.status.value if hasattr(c.status, "value") else c.status,
-            "description": c.description,
+            "description": redact_for_role(c.description, confidentiality, role),
+            "confidentiality_class": confidentiality,
             "last_contact": c.last_contact,
             "created_at": c.created_at,
         }
 
     def prayer_to_brief(p) -> dict:
+        confidentiality = p.confidentiality_class.value if hasattr(p.confidentiality_class, "value") else p.confidentiality_class
         return {
             "id": p.id,
             "member_id": p.member_id,
-            "submitted_by": p.submitted_by or (p.member.full_name if p.member else None),
-            "request_text": p.request_text,
+            "submitted_by": redact_for_role(
+                p.submitted_by or (p.member.full_name if p.member else None),
+                confidentiality,
+                role,
+            ),
+            "request_text": redact_for_role(p.request_text, confidentiality, role),
             "is_private": p.is_private,
+            "confidentiality_class": confidentiality,
             "status": p.status.value if hasattr(p.status, "value") else p.status,
             "created_at": p.created_at,
         }
+
+    if audience == "public":
+        public_prayers = [
+            p for p in briefing["unanswered_prayers"]
+            if (p.confidentiality_class.value if hasattr(p.confidentiality_class, "value") else p.confidentiality_class)
+            == ConfidentialityClass.public.value
+        ]
+        assert_public_only(public_prayers, "confidentiality_class", "briefing")
+        briefing["unanswered_prayers"] = public_prayers
+        briefing["active_care_cases"] = []
 
     plain_text = render_briefing_text(briefing)
 
