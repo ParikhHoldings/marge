@@ -7,11 +7,12 @@ Tables:
   - CareNote       : active care / crisis cases
   - PrayerRequest  : prayer requests with lifecycle
   - MemberNote     : pastoral CRM notes per member
+  - ChatActionTrace: parsed-intent/action audit records
 """
 
 from datetime import datetime, date
 from sqlalchemy import (
-    Column, Integer, String, Text, Date, DateTime,
+    Column, Integer, String, Text, Date, DateTime, Float,
     Boolean, ForeignKey, Enum
 )
 from sqlalchemy.orm import relationship
@@ -178,3 +179,22 @@ class MemberNote(Base):
 
     def __repr__(self):
         return f"<MemberNote id={self.id} member_id={self.member_id} tag={self.context_tag!r}>"
+
+
+class ChatActionTrace(Base):
+    """Audit trace for chat intent parsing and action execution."""
+
+    __tablename__ = "chat_action_traces"
+
+    id = Column(Integer, primary_key=True, index=True)
+    input_text = Column(Text, nullable=False)
+    inferred_intent = Column(String, nullable=False)
+    inferred_actions = Column(Text, nullable=False)
+    parser_confidence = Column(Float, nullable=False)
+    executed_actions = Column(Text, nullable=False)
+    outcome_status = Column(String, nullable=False)
+    outcome_detail = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<ChatActionTrace id={self.id} status={self.outcome_status}>"
