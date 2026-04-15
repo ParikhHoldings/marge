@@ -71,11 +71,23 @@ Marge can sync members and attendance from Rock RMS automatically.
 See `.env.example` for all available configuration options.
 
 Key variables:
+- `APP_ENV` — `development`, `staging`, or `production`
 - `PASTOR_NAME` — Pastor's first name (appears in all drafts)
 - `CHURCH_NAME` — Church name (appears in visitor messages)
-- `DATABASE_URL` — SQLite for dev, Postgres for production
+- `DATABASE_URL` — SQLite for dev, Postgres for staging/production
+- `CORS_ORIGINS` — Explicit origin allowlist (required in production)
+- `CORS_METHODS` / `CORS_HEADERS` — Scoped CORS methods and headers
+- `CORS_ALLOW_CREDENTIALS` — Keep `false` for token/header auth strategy
+- `RATE_LIMIT_ENABLED` — Enable optional abuse protection for chat/write endpoints
 - `ROCK_HALLMARK_API_KEY` — Optional Rock RMS API key
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — Optional Telegram delivery
+
+
+## Security & Deployment Profiles
+
+- Production startup now fails fast when required security config is missing/insecure (e.g., wildcard CORS, SQLite DB, default identity values).
+- Optional in-memory rate limiting can be enabled for `/chat` and write-heavy endpoints (`/members`, `/visitors`, `/care`).
+- See `docs/DEPLOYMENT_SECURITY.md` for secure staging vs production profiles and environment examples.
 
 ## Project Structure
 

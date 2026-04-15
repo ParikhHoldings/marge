@@ -14,7 +14,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -22,6 +22,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.database import init_db
+from app.security import (
+    InMemoryAbuseProtector,
+    get_cors_settings,
+    get_rate_limit_settings,
+    validate_environment,
+)
 from app.routers import briefing, visitors, members, care
 from app.routers import chat
 
@@ -37,7 +43,9 @@ logger = logging.getLogger("marge")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize the database on startup."""
-    logger.info("Marge is waking up. Initializing database…")
+    logger.info("Marge is waking up. Validating environment…")
+    validate_environment()
+    logger.info("Environment validation complete. Initializing database…")
     init_db()
     logger.info("Database ready. Good morning, Pastor.")
     yield
@@ -57,14 +65,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow all origins in dev; tighten in production
+cors = get_cors_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=cors.allow_origins,
+    allow_credentials=cors.allow_credentials,
+    allow_methods=cors.allow_methods,
+    allow_headers=cors.allow_headers,
 )
+
+rate_limit_settings = get_rate_limit_settings()
+abuse_protector = InMemoryAbuseProtector(rate_limit_settings)
+
+
+@app.middleware("http")
+async def abuse_protection_middleware(request: Request, call_next):
+    abuse_protector.check(request)
+    response = await call_next(request)
+    return response
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
