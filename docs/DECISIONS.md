@@ -1,5 +1,15 @@
 # Decisions
 
+## 2026-04-15 - Enforce secure-by-default runtime guards for production
+### Decision
+Production startup now performs fail-fast environment validation, CORS defaults were tightened to explicit allowlists/scoped methods-headers, and optional abuse protection/rate limiting was added for chat and write-heavy API paths.
+
+### Why
+Pilot-readiness requires preventing insecure deployment drift and reducing abuse risk on pastor-facing workflows without blocking staging velocity.
+
+### Impact
+Misconfigured production deployments fail immediately instead of running insecurely, and operators now have documented staging/production security profiles with optional traffic protection controls.
+
 ## 2026-04-10 - Use durable PostgreSQL instead of SQLite for Railway environments
 ### Decision
 Staging and production should both use PostgreSQL-backed `DATABASE_URL` values rather than SQLite on Railway.
