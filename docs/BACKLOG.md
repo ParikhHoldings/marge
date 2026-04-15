@@ -19,3 +19,5 @@
 - Which Marge workflow creates the strongest immediate willingness to pay in pilot churches?
 - What onboarding path is simplest for a real church pilot without operational drag?
 - Which proof points matter most for pastor trust during a sales/demo cycle?
+
+- [#6] Add migration drift detection check against model metadata in CI.

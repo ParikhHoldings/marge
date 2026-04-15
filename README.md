@@ -14,7 +14,10 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your values (PASTOR_NAME, CHURCH_NAME, etc.)
 
-# 3. Start the API server
+# 3. Apply DB migrations
+alembic upgrade head
+
+# 4. Start the API server
 uvicorn app.main:app --reload
 
 # API docs available at:
@@ -74,6 +77,7 @@ Key variables:
 - `PASTOR_NAME` — Pastor's first name (appears in all drafts)
 - `CHURCH_NAME` — Church name (appears in visitor messages)
 - `DATABASE_URL` — SQLite for dev, Postgres for production
+- `MARGE_LOCAL_DEV_CREATE_ALL` — Set `true` only for explicit local create_all bootstrap
 - `ROCK_HALLMARK_API_KEY` — Optional Rock RMS API key
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — Optional Telegram delivery
 
@@ -119,3 +123,18 @@ Marge is the beloved church secretary who's been at the church 30 years. She's w
 ---
 
 *Built for Nathan Parikh — Hallmark Church, Fort Worth TX. April 2026.*
+
+
+## Database Migrations
+
+Marge now uses Alembic for schema management.
+
+```bash
+# Apply all pending migrations
+alembic upgrade head
+
+# Show current DB revision
+alembic current
+```
+
+For staging/production migration safety and rollback steps, see `docs/OPERATIONS.md`.
