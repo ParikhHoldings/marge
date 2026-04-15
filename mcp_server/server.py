@@ -28,6 +28,7 @@ import os
 import json
 import httpx
 from datetime import date
+from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -64,10 +65,51 @@ def _post(path: str, body: dict) -> dict:
 
 def _find_member(name: str) -> dict | None:
     """Find first member matching name search."""
-    results = _get("/members/", params={"search": name})
+    results = _get("/members/", params={"q": name})
     if isinstance(results, list) and results:
         return results[0]
     return None
+
+
+def _normalize_api_error(error: httpx.HTTPStatusError) -> str:
+    """
+    Convert raw API failures into actionable pastor-facing prompts.
+    """
+    status = error.response.status_code
+    payload: Any = None
+    detail = ""
+    try:
+        payload = error.response.json()
+        detail = payload.get("detail", "") if isinstance(payload, dict) else ""
+    except Exception:
+        detail = error.response.text.strip()
+
+    if status == 400:
+        return (
+            "I couldn't process that request because some information was missing or invalid. "
+            f"Please review the details and try again. ({detail or 'Bad request'})"
+        )
+    if status == 404:
+        return (
+            "I couldn't find that record. Please confirm the name/ID and try again, "
+            "or run list_members first to verify who you're looking for."
+        )
+    if status == 422:
+        return (
+            "I need a little more detail to complete that action. "
+            f"Please check the required fields and try again. ({detail or 'Validation error'})"
+        )
+    if 400 <= status < 500:
+        return (
+            f"That request was rejected by Marge (HTTP {status}). "
+            f"Please adjust the input and retry. ({detail or 'Client error'})"
+        )
+    if 500 <= status < 600:
+        return (
+            f"Marge is having trouble right now (HTTP {status}). "
+            "Please try again in a moment. If this continues, contact your admin."
+        )
+    return f"Unexpected API error (HTTP {status}). Please try again."
 
 
 # ── Tool Definitions ──────────────────────────────────────────────────────────
@@ -227,6 +269,11 @@ async def list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "Name of the member to draft a message for.",
                     },
+                    "situation": {
+                        "type": "string",
+                        "description": "Context for the message (e.g. hospital, grief, encouragement). Defaults to 'general'.",
+                        "default": "general",
+                    },
                 },
                 "required": ["member_name"],
             },
@@ -269,7 +316,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
         elif name == "list_members":
             search = arguments.get("search", "")
-            members = _get("/members/", params={"search": search} if search else {})
+            members = _get("/members/", params={"q": search} if search else {})
             if not members:
                 return text("No members found matching that search.")
             lines = [f"Found {len(members)} member(s):"]
@@ -352,7 +399,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             member = _find_member(arguments["member_name"])
             if not member:
                 return text(f"Could not find a member named '{arguments['member_name']}'. Try list_members to search.")
-            result = _get(f"/members/{member['id']}/draft/care")
+            situation = arguments.get("situation", "general")
+            result = _get(f"/members/{member['id']}/draft/care", params={"situation": situation})
             draft = result.get("draft") or result.get("message") or json.dumps(result)
             return text(f"Draft for {member['full_name']}:\n\n{draft}")
 
@@ -364,7 +412,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return text(f"Unknown tool: {name}")
 
     except httpx.HTTPStatusError as e:
-        return text(f"Marge API error ({e.response.status_code}): {e.response.text}")
+        return text(_normalize_api_error(e))
     except Exception as e:
         return text(f"Error: {str(e)}")
 
