@@ -177,7 +177,7 @@ def _parse_rock_phone(person: dict) -> Optional[str]:
     return None
 
 
-def sync_members_from_rock(db: Session) -> Dict[str, int]:
+def sync_members_from_rock(db: Session, church_id: str) -> Dict[str, int]:
     """
     Sync active member records from Rock RMS into Marge's local Member table.
 
@@ -204,7 +204,11 @@ def sync_members_from_rock(db: Session) -> Dict[str, int]:
             stats["skipped"] += 1
             continue
 
-        existing = db.query(Member).filter(Member.rock_id == rock_id).first()
+        existing = (
+            db.query(Member)
+            .filter(Member.rock_id == rock_id, Member.church_id == church_id)
+            .first()
+        )
 
         if existing:
             # Update fields that may have changed in Rock
@@ -219,6 +223,7 @@ def sync_members_from_rock(db: Session) -> Dict[str, int]:
             first_name = person.get("FirstName") or person.get("NickName") or "Unknown"
             last_name = person.get("LastName") or ""
             member = Member(
+                church_id=church_id,
                 rock_id=rock_id,
                 first_name=first_name,
                 last_name=last_name,
@@ -238,7 +243,7 @@ def sync_members_from_rock(db: Session) -> Dict[str, int]:
     return stats
 
 
-def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
+def sync_attendance_from_rock(db: Session, church_id: str) -> Dict[str, int]:
     """
     Sync recent attendance records from Rock RMS and update Member.last_attendance.
 
@@ -294,7 +299,7 @@ def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
     stats = {"updated": 0, "not_found": 0, "alias_resolved": len(alias_to_person)}
 
     for rock_id, att_date in latest.items():
-        member = db.query(Member).filter(Member.rock_id == rock_id).first()
+        member = db.query(Member).filter(Member.rock_id == rock_id, Member.church_id == church_id).first()
         if not member:
             stats["not_found"] += 1
             continue
@@ -310,7 +315,7 @@ def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
     return stats
 
 
-def run_full_sync(db: Session) -> dict:
+def run_full_sync(db: Session, church_id: str) -> dict:
     """
     Run a full Rock RMS sync: members + attendance.
 
@@ -329,8 +334,8 @@ def run_full_sync(db: Session) -> dict:
             "message": "ROCK_HALLMARK_API_KEY not set — running in standalone mode.",
         }
 
-    member_stats = sync_members_from_rock(db)
-    attendance_stats = sync_attendance_from_rock(db)
+    member_stats = sync_members_from_rock(db, church_id=church_id)
+    attendance_stats = sync_attendance_from_rock(db, church_id=church_id)
 
     return {
         "rock_sync_enabled": True,

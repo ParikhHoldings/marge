@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.auth import AuthContext, ROLE_ADMIN, ROLE_PASTOR, ROLE_READ_ONLY, ROLE_STAFF, require_roles
 from app.services.marge import generate_morning_briefing, render_briefing_text
 
 router = APIRouter(prefix="/briefing", tags=["briefing"])
@@ -93,7 +94,10 @@ class BriefingResponse(BaseModel):
 
 
 @router.get("/today", response_model=BriefingResponse, summary="Get today's morning briefing")
-def get_today_briefing(db: Session = Depends(get_db)):
+def get_today_briefing(
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(require_roles(ROLE_PASTOR, ROLE_ADMIN, ROLE_STAFF, ROLE_READ_ONLY)),
+):
     """
     Generate and return Marge's morning briefing for today.
 
@@ -110,7 +114,12 @@ def get_today_briefing(db: Session = Depends(get_db)):
     pastor_name = os.getenv("PASTOR_NAME", "Pastor")
     church_name = os.getenv("CHURCH_NAME", "your church")
 
-    briefing = generate_morning_briefing(db, pastor_name=pastor_name, church_name=church_name)
+    briefing = generate_morning_briefing(
+        db,
+        pastor_name=pastor_name,
+        church_name=church_name,
+        church_id=auth.church_id,
+    )
 
     # Serialize ORM objects into Pydantic-compatible dicts
     def member_to_brief(m) -> dict:

@@ -45,6 +45,7 @@ logger = logging.getLogger("marge.briefing")
 
 PASTOR_NAME = os.getenv("PASTOR_NAME", "Nathan")
 CHURCH_NAME = os.getenv("CHURCH_NAME", "Hallmark Church")
+DEFAULT_CHURCH_ID = os.getenv("DEFAULT_CHURCH_ID", "default-church")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -105,7 +106,12 @@ def main():
 
     db = SessionLocal()
     try:
-        briefing = generate_morning_briefing(db, pastor_name=PASTOR_NAME, church_name=CHURCH_NAME)
+        briefing = generate_morning_briefing(
+            db,
+            pastor_name=PASTOR_NAME,
+            church_name=CHURCH_NAME,
+            church_id=DEFAULT_CHURCH_ID,
+        )
         text = render_briefing_text(briefing)
     finally:
         db.close()

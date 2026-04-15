@@ -14,7 +14,8 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -22,6 +23,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.database import init_db
+from app.auth import AuthError, validate_auth_headers
 from app.routers import briefing, visitors, members, care
 from app.routers import chat
 
@@ -51,11 +53,26 @@ app = FastAPI(
     description=(
         "Marge is the AI church secretary every solo pastor never had. "
         "She shows up every morning with the people your pastor needs to care for today — "
-        "and helps him do it."
+        "and helps him do it.\n\n"
+        "## Authentication\n"
+        "All API routes require auth except `/`, `/health`, and docs endpoints.\n\n"
+        "Use one of:\n"
+        "- `Authorization: Bearer <jwt>`\n"
+        "- `X-Session-Token: <session-token>`\n\n"
+        "JWT/session payload must include role (`pastor`, `admin`, `staff`, `read-only`) "
+        "and `church_id` for tenant scoping."
     ),
     version="0.1.0",
     lifespan=lifespan,
 )
+
+AUTH_EXEMPT_PATHS = {
+    "/",
+    "/health",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+}
 
 # CORS — allow all origins in dev; tighten in production
 app.add_middleware(
@@ -65,6 +82,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if (
+        path in AUTH_EXEMPT_PATHS
+        or path.startswith("/docs")
+        or path.startswith("/redoc")
+        or path.startswith("/openapi")
+        or path.startswith("/app")
+    ):
+        return await call_next(request)
+
+    try:
+        request.state.auth_context = validate_auth_headers(request)
+    except AuthError as exc:
+        return JSONResponse(status_code=401, content={"detail": str(exc)})
+
+    return await call_next(request)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
