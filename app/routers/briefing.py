@@ -6,7 +6,7 @@ care cases, absences, prayer requests, and proactive nudges.
 """
 
 import os
-from typing import List, Optional, Any
+from typing import List, Optional
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends
