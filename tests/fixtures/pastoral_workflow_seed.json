@@ -1,0 +1,45 @@
+{
+  "members": [
+    {
+      "key": "member_bday",
+      "first_name": "Bea",
+      "last_name": "Birthday",
+      "email": "bea@example.com",
+      "birthday_in_days": 1,
+      "anniversary_in_days": 2,
+      "last_attendance_days_ago": 35
+    },
+    {
+      "key": "member_hospital",
+      "first_name": "Henry",
+      "last_name": "Hospital",
+      "email": "henry@example.com",
+      "last_attendance_days_ago": 3
+    },
+    {
+      "key": "member_nudge",
+      "first_name": "Nina",
+      "last_name": "Nudge",
+      "email": "nina@example.com",
+      "last_attendance_days_ago": 10
+    }
+  ],
+  "visitors": [
+    {
+      "key": "visitor_followup",
+      "first_name": "Victor",
+      "last_name": "Visitor",
+      "email": "victor@example.com",
+      "visit_days_ago": 3,
+      "source": "walk-in"
+    },
+    {
+      "key": "visitor_recent",
+      "first_name": "Rhea",
+      "last_name": "Recent",
+      "email": "rhea@example.com",
+      "visit_days_ago": 0,
+      "source": "web"
+    }
+  ]
+}

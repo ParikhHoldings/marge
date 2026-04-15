@@ -8,7 +8,7 @@ API layer serializes and delivers.
 
 import os
 from datetime import date, datetime, timedelta
-from typing import List, Optional
+from typing import List
 
 from sqlalchemy.orm import Session
 
@@ -300,7 +300,6 @@ def get_nudges(db: Session) -> List[str]:
         List of human-readable nudge strings, e.g.:
         "You haven't called John since he mentioned losing his job 3 weeks ago"
     """
-    today = date.today()
     cutoff = datetime.utcnow() - timedelta(days=NUDGE_LOOKBACK_DAYS)
 
     # Pull recent notes that suggest a pastoral need
