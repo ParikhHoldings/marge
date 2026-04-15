@@ -19,3 +19,22 @@
 
 ### Recommended next focus
 - Add GitHub templates into Marge and align current active work with issue-based execution.
+
+## 2026-04-15
+### Shipped
+- Initialized Alembic with a baseline migration for current SQLAlchemy models.
+- Replaced startup auto-create behavior with migration-head verification in normal runtime.
+- Added CI migration smoke checks (upgrade/downgrade/re-upgrade) against ephemeral Postgres.
+- Added operations runbook for backup-before-migration and rollback steps.
+
+### In progress
+- Tightening migration ergonomics for local developer setup and drift detection.
+
+### Blocked
+- No blockers currently.
+
+### Approvals needed
+- None for staging rollout; production promotion still follows existing approval boundary.
+
+### Recommended next focus
+- Add migration autogenerate guardrails and a schema drift check in CI.

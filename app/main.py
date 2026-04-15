@@ -36,8 +36,8 @@ logger = logging.getLogger("marge")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize the database on startup."""
-    logger.info("Marge is waking up. Initializing database…")
+    """Initialize the database policy on startup."""
+    logger.info("Marge is waking up. Verifying database state…")
     init_db()
     logger.info("Database ready. Good morning, Pastor.")
     yield

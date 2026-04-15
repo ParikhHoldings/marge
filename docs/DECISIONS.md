@@ -29,3 +29,13 @@ Marge is active, real, revenue-adjacent, and mature enough to validate the syste
 
 ### Impact
 Lessons from this rollout should shape the standard before propagation to SundayEngine, Nexdo, and FDD Tracker.
+
+## 2026-04-15 - Standardize on Alembic migrations; remove production create_all startup
+### Decision
+Initialize Alembic as the source of truth for schema changes and fail startup when DB is not at migration head.
+
+### Why
+Automatic `create_all` in runtime startup can silently drift from controlled, reviewable schema changes and weakens operational safety.
+
+### Impact
+Staging/production now require running `alembic upgrade head` before app startup. `create_all` remains available only via `MARGE_LOCAL_DEV_CREATE_ALL=true` for explicit local bootstrap use.
