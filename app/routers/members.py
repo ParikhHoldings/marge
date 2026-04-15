@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Member, MemberNote
+from app.privacy import AccessRole, ConfidentialityClass, get_request_role, redact_for_role
 from app.services.marge import draft_care_message
 from app.integrations import rock as rock_sync
 
@@ -56,6 +57,7 @@ class MemberUpdate(BaseModel):
 class NoteCreate(BaseModel):
     note_text: str
     context_tag: Optional[str] = None  # job, health, family, grief, etc.
+    confidentiality_class: ConfidentialityClass = ConfidentialityClass.private
 
 
 class NoteResponse(BaseModel):
@@ -63,6 +65,7 @@ class NoteResponse(BaseModel):
     member_id: int
     note_text: str
     context_tag: Optional[str] = None
+    confidentiality_class: ConfidentialityClass
     created_at: datetime
 
     class Config:
@@ -145,12 +148,16 @@ def list_members(
 
 
 @router.get("/{member_id}", response_model=MemberDetailResponse, summary="Get member detail + notes")
-def get_member(member_id: int, db: Session = Depends(get_db)):
+def get_member(
+    member_id: int,
+    db: Session = Depends(get_db),
+    role: AccessRole = Depends(get_request_role),
+):
     """
     Retrieve a member's full record including all pastoral notes.
     """
     member = _get_or_404(db, member_id)
-    return _to_detail_response(member)
+    return _to_detail_response(member, role)
 
 
 @router.patch("/{member_id}", response_model=MemberResponse, summary="Update member info")
@@ -178,7 +185,12 @@ def delete_member(member_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{member_id}/notes", response_model=NoteResponse, status_code=201, summary="Add a pastoral note")
-def add_note(member_id: int, note_in: NoteCreate, db: Session = Depends(get_db)):
+def add_note(
+    member_id: int,
+    note_in: NoteCreate,
+    db: Session = Depends(get_db),
+    role: AccessRole = Depends(get_request_role),
+):
     """
     Add a pastoral note to a congregation member's record.
 
@@ -192,11 +204,12 @@ def add_note(member_id: int, note_in: NoteCreate, db: Session = Depends(get_db))
         member_id=member_id,
         note_text=note_in.note_text,
         context_tag=note_in.context_tag,
+        confidentiality_class=note_in.confidentiality_class.value,
     )
     db.add(note)
     db.commit()
     db.refresh(note)
-    return note
+    return _to_note_response(note, role)
 
 
 @router.get("/{member_id}/notes", response_model=List[NoteResponse], summary="List pastoral notes for a member")
@@ -205,6 +218,7 @@ def list_notes(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
+    role: AccessRole = Depends(get_request_role),
 ):
     """
     List all pastoral notes for a congregation member, most recent first.
@@ -218,7 +232,7 @@ def list_notes(
         .limit(limit)
         .all()
     )
-    return notes
+    return [_to_note_response(note, role) for note in notes]
 
 
 @router.get(
@@ -293,16 +307,26 @@ def _to_response(m: Member) -> dict:
     }
 
 
-def _to_detail_response(m: Member) -> dict:
+def _to_note_response(n: MemberNote, role: AccessRole) -> dict:
+    confidentiality = (
+        n.confidentiality_class.value
+        if hasattr(n.confidentiality_class, "value")
+        else n.confidentiality_class
+    )
+    return {
+        "id": n.id,
+        "member_id": n.member_id,
+        "note_text": redact_for_role(n.note_text, confidentiality, role),
+        "context_tag": n.context_tag,
+        "confidentiality_class": confidentiality,
+        "created_at": n.created_at,
+    }
+
+
+def _to_detail_response(m: Member, role: AccessRole) -> dict:
     base = _to_response(m)
     base["notes"] = [
-        {
-            "id": n.id,
-            "member_id": n.member_id,
-            "note_text": n.note_text,
-            "context_tag": n.context_tag,
-            "created_at": n.created_at,
-        }
+        _to_note_response(n, role)
         for n in sorted(m.notes, key=lambda x: x.created_at, reverse=True)
     ]
     return base
