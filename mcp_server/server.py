@@ -26,16 +26,19 @@ Claude Desktop config (~/.claude/claude_desktop_config.json):
 
 import os
 import json
+import logging
 import httpx
 from datetime import date
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
+from app.observability import inc_counter
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 MARGE_API_URL = os.getenv("MARGE_API_URL", "http://localhost:8000").rstrip("/")
+logger = logging.getLogger("marge.mcp")
 
 # ── Server ────────────────────────────────────────────────────────────────────
 
@@ -361,11 +364,16 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return text(result.get("reply", "Got it."))
 
         else:
+            inc_counter("mcp_tool_failures_total", tool=name, error_class="UnknownTool")
             return text(f"Unknown tool: {name}")
 
     except httpx.HTTPStatusError as e:
+        inc_counter("mcp_tool_failures_total", tool=name, error_class="HTTPStatusError")
+        logger.error("MCP tool HTTP error for %s: %s", name, e)
         return text(f"Marge API error ({e.response.status_code}): {e.response.text}")
     except Exception as e:
+        inc_counter("mcp_tool_failures_total", tool=name, error_class=e.__class__.__name__)
+        logger.error("MCP tool failure for %s: %s", name, e)
         return text(f"Error: {str(e)}")
 
 

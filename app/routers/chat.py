@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.observability import inc_counter, time_workflow
 from app.models import Member, MemberNote, CareNote, PrayerRequest, Visitor
 from app.services.marge import (
     draft_care_message,
@@ -208,6 +209,7 @@ def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
 
     if actions:
         db.commit()
+        inc_counter("chat_action_total", status="success")
         action_bits = []
         for action in actions:
             if action["type"] == "member_note":
@@ -231,6 +233,7 @@ def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
     api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
+        inc_counter("chat_action_total", status="no_action")
         return ChatResponse(
             reply=f"Got it, {pastor_name}. I heard you, but I could not confidently turn that into a concrete action yet. Try naming the person and what happened, and I will log it, open care, or prepare a draft.",
             actions=[],
@@ -248,21 +251,24 @@ def chat_with_marge(request: ChatRequest, db: Session = Depends(get_db)):
 
         system = MARGE_SYSTEM_PROMPT + f"\n\nThe pastor's name is {pastor_name}. The church is {church_name}."
 
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": request.message},
-            ],
-            max_tokens=150,
-            temperature=0.7,
-        )
+        with time_workflow("chat_fallback_latency_ms"):
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": request.message},
+                ],
+                max_tokens=150,
+                temperature=0.7,
+            )
 
         reply = response.choices[0].message.content.strip()
+        inc_counter("chat_action_total", status="no_action")
         return ChatResponse(reply=reply, actions=[], drafts=[], suggested_prompts=[])
 
     except Exception as e:
         logger.error(f"OpenAI chat error: {e}")
+        inc_counter("chat_action_total", status="failure")
         return ChatResponse(
             reply=f"Got it, {pastor_name}. I heard you, but I could not confidently turn that into a concrete action yet. Try naming the person and what happened, and I will log it, open care, or prepare a draft.",
             actions=[],

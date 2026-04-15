@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Member, MemberNote
+from app.observability import inc_counter, time_workflow
 from app.services.marge import draft_care_message
 from app.integrations import rock as rock_sync
 
@@ -263,7 +264,19 @@ def sync_from_rock(db: Session = Depends(get_db)):
     Safe to call even without Rock credentials — returns a clear message
     if the API key is not configured.
     """
-    result = rock_sync.run_full_sync(db)
+    with time_workflow("rock_sync_latency_ms"):
+        result = rock_sync.run_full_sync(db)
+    if result.get("rock_sync_enabled"):
+        member_stats = result.get("members") or {}
+        attendance_stats = result.get("attendance") or {}
+        total_created = int(member_stats.get("created", 0))
+        total_updated = int(member_stats.get("updated", 0)) + int(attendance_stats.get("updated", 0))
+        if total_created > 0 or total_updated > 0:
+            inc_counter("rock_sync_outcome_total", status="success")
+        else:
+            inc_counter("rock_sync_outcome_total", status="degraded")
+    else:
+        inc_counter("rock_sync_outcome_total", status="disabled")
     return result
 
 
