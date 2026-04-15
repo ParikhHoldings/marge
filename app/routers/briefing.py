@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.observability import inc_counter, time_workflow
 from app.services.marge import generate_morning_briefing, render_briefing_text
 
 router = APIRouter(prefix="/briefing", tags=["briefing"])
@@ -109,8 +110,13 @@ def get_today_briefing(db: Session = Depends(get_db)):
     """
     pastor_name = os.getenv("PASTOR_NAME", "Pastor")
     church_name = os.getenv("CHURCH_NAME", "your church")
-
-    briefing = generate_morning_briefing(db, pastor_name=pastor_name, church_name=church_name)
+    try:
+        with time_workflow("briefing_generation_latency_ms"):
+            briefing = generate_morning_briefing(db, pastor_name=pastor_name, church_name=church_name)
+        inc_counter("briefing_generation_total", status="success")
+    except Exception:
+        inc_counter("briefing_generation_total", status="failure")
+        raise
 
     # Serialize ORM objects into Pydantic-compatible dicts
     def member_to_brief(m) -> dict:
