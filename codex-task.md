@@ -1,4 +1,13 @@
-# Marge Build Task
+# Historical Marge Build Task
+
+This file is the original April build prompt. It is retained for history only.
+
+Do not treat the instructions below as active repo instructions. In particular, do not follow the old branch, push, commit, backend-editing, or `openclaw` instructions unless a current user explicitly asks for that exact workflow. For current project context, read `AGENTS.md`, `README.md`, `docs/THREAD_GOAL_AUDIT.md`, and `docs/PRODUCTION_READINESS.md`.
+
+---
+
+```text
+# Original Prompt
 
 You are building new features for Marge — an AI pastoral assistant. The repo is already set up at /root/marge-build. You are on the staging branch. Do NOT touch any existing backend files in app/ unless adding new endpoints.
 
@@ -80,3 +89,4 @@ Commit in logical chunks with descriptive messages. Push all to origin/staging.
 
 When finished, run this exact command:
 openclaw system event --text "Done: Marge chat endpoint + briefing actions + MCP server pushed to staging" --mode now
+```

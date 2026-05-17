@@ -10,17 +10,26 @@ Endpoints:
   GET    /visitors/{id}/draft   Get a pre-written follow-up message draft
 """
 
-import os
 from typing import List, Optional
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Visitor
+from app.models import AccountPastorProfile, Visitor
+from app.services.accounts import (
+    PASTORAL_ROLES,
+    STAFF_ROLES,
+    account_access_from_token,
+    account_id,
+    require_role,
+    scoped_query,
+)
 from app.services.marge import draft_visitor_followup
+from app.services.setup_actions import retire_data_seed_actions
+from app.services.visitor_followup import queue_visitor_welcome_action
 
 router = APIRouter(prefix="/visitors", tags=["visitors"])
 
@@ -80,15 +89,25 @@ class DraftResponse(BaseModel):
 
 
 @router.post("/", response_model=VisitorResponse, status_code=201, summary="Log a new visitor")
-def create_visitor(visitor_in: VisitorCreate, db: Session = Depends(get_db)):
+def create_visitor(
+    visitor_in: VisitorCreate,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """
     Log a first-time (or repeat) visitor.
 
-    Marge will automatically surface this visitor in the morning briefing
-    once 48 hours have passed and no follow-up has been sent.
+    Marge queues a reviewable welcome draft immediately, then keeps the
+    visitor visible in follow-up views until the pastor marks follow-up sent.
     """
-    visitor = Visitor(**visitor_in.model_dump())
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "log visitors")
+    account = access.account
+    visitor = Visitor(**visitor_in.model_dump(), account_id=account_id(account))
     db.add(visitor)
+    db.flush()
+    queue_visitor_welcome_action(db, visitor, account)
+    retire_data_seed_actions(db, account, reason="visitor_created", related_type="visitor", related_id=visitor.id)
     db.commit()
     db.refresh(visitor)
     return _to_response(visitor)
@@ -99,12 +118,16 @@ def list_visitors(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     needs_followup: bool = Query(False, description="Filter to visitors needing Day-1 follow-up"),
+    x_marge_account_token: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
     """
     List all visitors, optionally filtered to those needing follow-up.
     """
-    query = db.query(Visitor)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, STAFF_ROLES, "view visitors")
+    account = access.account
+    query = scoped_query(db.query(Visitor), Visitor, account)
     if needs_followup:
         cutoff = date.today()
         query = query.filter(
@@ -116,20 +139,35 @@ def list_visitors(
 
 
 @router.get("/{visitor_id}", response_model=VisitorResponse, summary="Get a visitor")
-def get_visitor(visitor_id: int, db: Session = Depends(get_db)):
+def get_visitor(
+    visitor_id: int,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """Retrieve a single visitor record by ID."""
-    visitor = _get_or_404(db, visitor_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, STAFF_ROLES, "view visitors")
+    account = access.account
+    visitor = _get_or_404(db, visitor_id, account)
     return _to_response(visitor)
 
 
 @router.patch("/{visitor_id}", response_model=VisitorResponse, summary="Update a visitor")
-def update_visitor(visitor_id: int, update: VisitorUpdate, db: Session = Depends(get_db)):
+def update_visitor(
+    visitor_id: int,
+    update: VisitorUpdate,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """
     Update visitor details or mark a follow-up step as sent.
 
     Example: mark Day-1 follow-up as sent after the pastor sends the text.
     """
-    visitor = _get_or_404(db, visitor_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "update visitors")
+    account = access.account
+    visitor = _get_or_404(db, visitor_id, account)
     for field, value in update.model_dump(exclude_unset=True).items():
         setattr(visitor, field, value)
     db.commit()
@@ -138,9 +176,16 @@ def update_visitor(visitor_id: int, update: VisitorUpdate, db: Session = Depends
 
 
 @router.delete("/{visitor_id}", status_code=204, summary="Delete a visitor record")
-def delete_visitor(visitor_id: int, db: Session = Depends(get_db)):
+def delete_visitor(
+    visitor_id: int,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """Delete a visitor record. Use when a visitor becomes a member or was entered in error."""
-    visitor = _get_or_404(db, visitor_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "delete visitors")
+    account = access.account
+    visitor = _get_or_404(db, visitor_id, account)
     db.delete(visitor)
     db.commit()
 
@@ -153,6 +198,7 @@ def delete_visitor(visitor_id: int, db: Session = Depends(get_db)):
 def get_visitor_draft(
     visitor_id: int,
     day: int = Query(1, description="Follow-up day: 1 (text), 3 (email), 14 (invitation)"),
+    x_marge_account_token: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
     """
@@ -164,9 +210,11 @@ def get_visitor_draft(
 
     The pastor reviews the draft and sends it — Marge never sends automatically.
     """
-    visitor = _get_or_404(db, visitor_id)
-    pastor_name = os.getenv("PASTOR_NAME", "Pastor")
-    church_name = os.getenv("CHURCH_NAME", "our church")
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "draft visitor follow-up")
+    account = access.account
+    visitor = _get_or_404(db, visitor_id, account)
+    pastor_name, church_name = _pastor_context(db, account)
 
     draft = draft_visitor_followup(
         visitor=visitor,
@@ -186,11 +234,21 @@ def get_visitor_draft(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _get_or_404(db: Session, visitor_id: int) -> Visitor:
-    visitor = db.query(Visitor).filter(Visitor.id == visitor_id).first()
+def _get_or_404(db: Session, visitor_id: int, account=None) -> Visitor:
+    visitor = scoped_query(db.query(Visitor), Visitor, account).filter(Visitor.id == visitor_id).first()
     if not visitor:
         raise HTTPException(status_code=404, detail="Visitor not found")
     return visitor
+
+
+def _pastor_context(db: Session, account=None) -> tuple[str, str]:
+    if account:
+        profile = db.query(AccountPastorProfile).filter(AccountPastorProfile.account_id == account.id).first()
+        return (
+            (profile.pastor_name if profile else None) or account.pastor_name or "Pastor",
+            (profile.church_name if profile else None) or account.church_name or "our church",
+        )
+    return "Pastor", "our church"
 
 
 def _to_response(v: Visitor) -> dict:

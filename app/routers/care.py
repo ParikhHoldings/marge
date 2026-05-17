@@ -20,12 +20,20 @@ Prayer request endpoints:
 from typing import List, Optional
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import CareNote, PrayerRequest, Member
+from app.services.accounts import (
+    PASTORAL_ROLES,
+    account_access_from_token,
+    account_id,
+    require_role,
+    scoped_query,
+)
+from app.services.setup_actions import retire_data_seed_actions
 
 router = APIRouter(prefix="/care", tags=["care"])
 
@@ -98,7 +106,11 @@ class PrayerResponse(BaseModel):
 
 
 @router.post("/", response_model=CareResponse, status_code=201, summary="Open a new care case")
-def create_care_case(care_in: CareCreate, db: Session = Depends(get_db)):
+def create_care_case(
+    care_in: CareCreate,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """
     Open a new pastoral care case for a congregation member.
 
@@ -107,11 +119,15 @@ def create_care_case(care_in: CareCreate, db: Session = Depends(get_db)):
     Marge will surface active cases with no recent contact in the morning
     briefing after 7 days.
     """
-    member = db.query(Member).filter(Member.id == care_in.member_id).first()
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "open care cases")
+    account = access.account
+    member = scoped_query(db.query(Member), Member, account).filter(Member.id == care_in.member_id).first()
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
 
     care = CareNote(
+        account_id=account_id(account),
         member_id=care_in.member_id,
         category=care_in.category,
         description=care_in.description,
@@ -119,6 +135,8 @@ def create_care_case(care_in: CareCreate, db: Session = Depends(get_db)):
         status="active",
     )
     db.add(care)
+    db.flush()
+    retire_data_seed_actions(db, account, reason="care_case_created", related_type="care", related_id=care.id)
     db.commit()
     db.refresh(care)
     return _to_care_response(care)
@@ -130,12 +148,16 @@ def list_care_cases(
     category: Optional[str] = Query(None, description="Filter by category: hospital | crisis | grief | general"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    x_marge_account_token: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
     """
     List pastoral care cases, optionally filtered by status and/or category.
     """
-    query = db.query(CareNote)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "view care cases")
+    account = access.account
+    query = scoped_query(db.query(CareNote), CareNote, account)
     if status:
         query = query.filter(CareNote.status == status)
     if category:
@@ -144,19 +166,34 @@ def list_care_cases(
     return [_to_care_response(c) for c in cases]
 
 
-@router.get("/{care_id}", response_model=CareResponse, summary="Get a care case")
-def get_care_case(care_id: int, db: Session = Depends(get_db)):
+@router.get("/{care_id:int}", response_model=CareResponse, summary="Get a care case")
+def get_care_case(
+    care_id: int,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """Retrieve a single care case by ID."""
-    care = _get_care_or_404(db, care_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "view care cases")
+    account = access.account
+    care = _get_care_or_404(db, care_id, account)
     return _to_care_response(care)
 
 
-@router.patch("/{care_id}", response_model=CareResponse, summary="Update a care case")
-def update_care_case(care_id: int, update: CareUpdate, db: Session = Depends(get_db)):
+@router.patch("/{care_id:int}", response_model=CareResponse, summary="Update a care case")
+def update_care_case(
+    care_id: int,
+    update: CareUpdate,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """
     Update a care case — change category, status, description, or last_contact date.
     """
-    care = _get_care_or_404(db, care_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "update care cases")
+    account = access.account
+    care = _get_care_or_404(db, care_id, account)
     for field, value in update.model_dump(exclude_unset=True).items():
         setattr(care, field, value)
     db.commit()
@@ -164,38 +201,60 @@ def update_care_case(care_id: int, update: CareUpdate, db: Session = Depends(get
     return _to_care_response(care)
 
 
-@router.delete("/{care_id}", status_code=204, summary="Delete a care case")
-def delete_care_case(care_id: int, db: Session = Depends(get_db)):
+@router.delete("/{care_id:int}", status_code=204, summary="Delete a care case")
+def delete_care_case(
+    care_id: int,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """Delete a care case record."""
-    care = _get_care_or_404(db, care_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "delete care cases")
+    account = access.account
+    care = _get_care_or_404(db, care_id, account)
     db.delete(care)
     db.commit()
 
 
-@router.post("/{care_id}/resolve", response_model=CareResponse, summary="Resolve a care case")
-def resolve_care_case(care_id: int, db: Session = Depends(get_db)):
+@router.post("/{care_id:int}/resolve", response_model=CareResponse, summary="Resolve a care case")
+def resolve_care_case(
+    care_id: int,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """
     Mark a care case as resolved.
 
     Marge will stop surfacing it in the morning briefing.
     The case remains in the database for historical reference.
     """
-    care = _get_care_or_404(db, care_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "resolve care cases")
+    account = access.account
+    care = _get_care_or_404(db, care_id, account)
     care.status = "resolved"
     db.commit()
     db.refresh(care)
     return _to_care_response(care)
 
 
-@router.post("/{care_id}/contact", response_model=CareResponse, summary="Log a pastoral contact")
-def log_contact(care_id: int, log: ContactLog, db: Session = Depends(get_db)):
+@router.post("/{care_id:int}/contact", response_model=CareResponse, summary="Log a pastoral contact")
+def log_contact(
+    care_id: int,
+    log: ContactLog,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """
     Log a pastoral contact for a care case and update last_contact.
 
     This resets Marge's 7-day follow-up timer for this case.
     Optionally appends a note to the care case description.
     """
-    care = _get_care_or_404(db, care_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "log pastoral contacts")
+    account = access.account
+    care = _get_care_or_404(db, care_id, account)
     care.last_contact = log.contact_date or date.today()
 
     if log.note:
@@ -212,19 +271,27 @@ def log_contact(care_id: int, log: ContactLog, db: Session = Depends(get_db)):
 
 
 @router.post("/prayers/", response_model=PrayerResponse, status_code=201, summary="Submit a prayer request")
-def create_prayer_request(prayer_in: PrayerCreate, db: Session = Depends(get_db)):
+def create_prayer_request(
+    prayer_in: PrayerCreate,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """
     Create a new prayer request.
 
     member_id is optional — anonymous requests are supported.
     is_private=True keeps the request out of the public prayer list.
     """
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "submit prayer requests")
+    account = access.account
     if prayer_in.member_id:
-        member = db.query(Member).filter(Member.id == prayer_in.member_id).first()
+        member = scoped_query(db.query(Member), Member, account).filter(Member.id == prayer_in.member_id).first()
         if not member:
             raise HTTPException(status_code=404, detail="Member not found")
 
     prayer = PrayerRequest(
+        account_id=account_id(account),
         member_id=prayer_in.member_id,
         submitted_by=prayer_in.submitted_by,
         request_text=prayer_in.request_text,
@@ -232,6 +299,8 @@ def create_prayer_request(prayer_in: PrayerCreate, db: Session = Depends(get_db)
         status="active",
     )
     db.add(prayer)
+    db.flush()
+    retire_data_seed_actions(db, account, reason="prayer_created", related_type="prayer", related_id=prayer.id)
     db.commit()
     db.refresh(prayer)
     return _to_prayer_response(prayer)
@@ -243,6 +312,7 @@ def list_prayer_requests(
     include_private: bool = Query(False, description="Include private requests"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    x_marge_account_token: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
     """
@@ -250,7 +320,10 @@ def list_prayer_requests(
 
     Private requests are excluded by default to protect member privacy.
     """
-    query = db.query(PrayerRequest)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "view prayer requests")
+    account = access.account
+    query = scoped_query(db.query(PrayerRequest), PrayerRequest, account)
     if status:
         query = query.filter(PrayerRequest.status == status)
     if not include_private:
@@ -259,15 +332,27 @@ def list_prayer_requests(
     return [_to_prayer_response(p) for p in prayers]
 
 
-@router.get("/prayers/{prayer_id}", response_model=PrayerResponse, summary="Get a prayer request")
-def get_prayer_request(prayer_id: int, db: Session = Depends(get_db)):
+@router.get("/prayers/{prayer_id:int}", response_model=PrayerResponse, summary="Get a prayer request")
+def get_prayer_request(
+    prayer_id: int,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """Retrieve a single prayer request by ID."""
-    prayer = _get_prayer_or_404(db, prayer_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "view prayer requests")
+    account = access.account
+    prayer = _get_prayer_or_404(db, prayer_id, account)
     return _to_prayer_response(prayer)
 
 
-@router.patch("/prayers/{prayer_id}", response_model=PrayerResponse, summary="Update a prayer request")
-def update_prayer_request(prayer_id: int, update: PrayerUpdate, db: Session = Depends(get_db)):
+@router.patch("/prayers/{prayer_id:int}", response_model=PrayerResponse, summary="Update a prayer request")
+def update_prayer_request(
+    prayer_id: int,
+    update: PrayerUpdate,
+    x_marge_account_token: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+):
     """
     Update a prayer request status or text.
 
@@ -276,7 +361,10 @@ def update_prayer_request(prayer_id: int, update: PrayerUpdate, db: Session = De
     - status='expired'  — archive stale requests
     - is_private=True   — make a public request private
     """
-    prayer = _get_prayer_or_404(db, prayer_id)
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "update prayer requests")
+    account = access.account
+    prayer = _get_prayer_or_404(db, prayer_id, account)
     for field, value in update.model_dump(exclude_unset=True).items():
         setattr(prayer, field, value)
     prayer.updated_at = datetime.utcnow()
@@ -288,15 +376,15 @@ def update_prayer_request(prayer_id: int, update: PrayerUpdate, db: Session = De
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _get_care_or_404(db: Session, care_id: int) -> CareNote:
-    care = db.query(CareNote).filter(CareNote.id == care_id).first()
+def _get_care_or_404(db: Session, care_id: int, account=None) -> CareNote:
+    care = scoped_query(db.query(CareNote), CareNote, account).filter(CareNote.id == care_id).first()
     if not care:
         raise HTTPException(status_code=404, detail="Care case not found")
     return care
 
 
-def _get_prayer_or_404(db: Session, prayer_id: int) -> PrayerRequest:
-    prayer = db.query(PrayerRequest).filter(PrayerRequest.id == prayer_id).first()
+def _get_prayer_or_404(db: Session, prayer_id: int, account=None) -> PrayerRequest:
+    prayer = scoped_query(db.query(PrayerRequest), PrayerRequest, account).filter(PrayerRequest.id == prayer_id).first()
     if not prayer:
         raise HTTPException(status_code=404, detail="Prayer request not found")
     return prayer

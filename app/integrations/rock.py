@@ -27,8 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-ROCK_BASE = os.getenv("ROCK_BASE_URL", "https://rock.hbcfw.org/api/v2")
-ROCK_API_KEY = os.getenv("ROCK_HALLMARK_API_KEY", "")
+ROCK_DEFAULT_BASE = "https://rock.hbcfw.org/api/v2"
 
 # Reasonable timeouts for API calls
 REQUEST_TIMEOUT = int(os.getenv("ROCK_REQUEST_TIMEOUT", "15"))
@@ -39,18 +38,26 @@ ROCK_ACTIVE_RECORD_STATUS_ID = 3  # "Active" in Rock
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
-def _headers() -> Dict[str, str]:
+def _rock_api_key(api_key: Optional[str] = None) -> str:
+    return api_key or os.getenv("ROCK_HALLMARK_API_KEY", "")
+
+
+def _rock_base_url(base_url: Optional[str] = None) -> str:
+    return (base_url or os.getenv("ROCK_BASE_URL") or ROCK_DEFAULT_BASE).rstrip("/")
+
+
+def _headers(api_key: Optional[str] = None) -> Dict[str, str]:
     """Return request headers with auth token."""
     return {
-        "Authorization-Token": ROCK_API_KEY,
+        "Authorization-Token": _rock_api_key(api_key),
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
 
 
-def _is_configured() -> bool:
+def _is_configured(api_key: Optional[str] = None) -> bool:
     """Return True if Rock API key is available."""
-    if not ROCK_API_KEY:
+    if not _rock_api_key(api_key):
         logger.warning(
             "ROCK_HALLMARK_API_KEY is not set — Rock RMS sync is disabled. "
             "Marge will operate in standalone mode."
@@ -59,28 +66,34 @@ def _is_configured() -> bool:
     return True
 
 
-def _get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Optional[List[dict]]:
+def _get(
+    endpoint: str,
+    params: Optional[Dict[str, Any]] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> Optional[List[dict]]:
     """
     Make a GET request to Rock RMS and return the JSON response.
 
     Returns None on any error (including missing API key) so callers
     can gracefully fall back to an empty result.
     """
-    if not _is_configured():
+    if not _is_configured(api_key):
         return None
 
-    url = f"{ROCK_BASE}/{endpoint.lstrip('/')}"
+    rock_base = _rock_base_url(base_url)
+    url = f"{rock_base}/{endpoint.lstrip('/')}"
     try:
         response = requests.get(
             url,
-            headers=_headers(),
+            headers=_headers(api_key),
             params=params or {},
             timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
         return response.json()
     except requests.exceptions.ConnectionError:
-        logger.error("Could not connect to Rock RMS at %s — check ROCK_BASE_URL.", ROCK_BASE)
+        logger.error("Could not connect to Rock RMS at %s — check ROCK_BASE_URL.", rock_base)
         return None
     except requests.exceptions.Timeout:
         logger.error("Rock RMS request timed out after %ds.", REQUEST_TIMEOUT)
@@ -95,7 +108,7 @@ def _get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Optional[Lis
 
 # ── People Sync ────────────────────────────────────────────────────────────────
 
-def fetch_active_members() -> List[dict]:
+def fetch_active_members(api_key: Optional[str] = None, base_url: Optional[str] = None) -> List[dict]:
     """
     Fetch active people records from Rock RMS.
 
@@ -113,13 +126,13 @@ def fetch_active_members() -> List[dict]:
         ),
         "$top": 1000,
     }
-    data = _get("People", params)
+    data = _get("People", params, api_key=api_key, base_url=base_url)
     if data is None:
         return []
     return data if isinstance(data, list) else data.get("value", [])
 
 
-def fetch_attendance_records(top: int = 500) -> List[dict]:
+def fetch_attendance_records(top: int = 500, api_key: Optional[str] = None, base_url: Optional[str] = None) -> List[dict]:
     """
     Fetch recent attendance records from Rock RMS.
 
@@ -134,7 +147,7 @@ def fetch_attendance_records(top: int = 500) -> List[dict]:
         "$select": "PersonAlias/PersonId,StartDateTime",
         "$expand": "PersonAlias",
     }
-    data = _get("Attendances", params)
+    data = _get("Attendances", params, api_key=api_key, base_url=base_url)
     if data is None:
         return []
     return data if isinstance(data, list) else data.get("value", [])
@@ -176,7 +189,12 @@ def _parse_rock_phone(person: dict) -> Optional[str]:
     return None
 
 
-def sync_members_from_rock(db: Session) -> Dict[str, int]:
+def sync_members_from_rock(
+    db: Session,
+    account_id: Optional[int] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> Dict[str, int]:
     """
     Sync active member records from Rock RMS into Marge's local Member table.
 
@@ -190,20 +208,25 @@ def sync_members_from_rock(db: Session) -> Dict[str, int]:
     Returns:
         {"created": N, "updated": N, "skipped": N}
     """
-    people = fetch_active_members()
+    people = fetch_active_members(api_key=api_key, base_url=base_url)
     if not people:
         logger.info("No active people returned from Rock RMS (sync skipped or API unavailable).")
         return {"created": 0, "updated": 0, "skipped": 0}
 
     stats = {"created": 0, "updated": 0, "skipped": 0}
 
+    seen_rock_ids: set[str] = set()
     for person in people:
-        rock_id = str(person.get("Id", ""))
+        rock_id = str(person.get("Id", "")).strip()
         if not rock_id:
             stats["skipped"] += 1
             continue
+        if rock_id in seen_rock_ids:
+            stats["skipped"] += 1
+            continue
+        seen_rock_ids.add(rock_id)
 
-        existing = db.query(Member).filter(Member.rock_id == rock_id).first()
+        existing = db.query(Member).filter(Member.rock_id == rock_id, Member.account_id == account_id).first()
 
         if existing:
             # Update fields that may have changed in Rock
@@ -216,6 +239,7 @@ def sync_members_from_rock(db: Session) -> Dict[str, int]:
             stats["updated"] += 1
         else:
             member = Member(
+                account_id=account_id,
                 rock_id=rock_id,
                 first_name=person.get("FirstName", "Unknown"),
                 last_name=person.get("LastName", ""),
@@ -235,7 +259,12 @@ def sync_members_from_rock(db: Session) -> Dict[str, int]:
     return stats
 
 
-def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
+def sync_attendance_from_rock(
+    db: Session,
+    account_id: Optional[int] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> Dict[str, int]:
     """
     Sync recent attendance records from Rock RMS and update Member.last_attendance.
 
@@ -248,7 +277,7 @@ def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
     Returns:
         {"updated": N, "not_found": N}
     """
-    attendances = fetch_attendance_records()
+    attendances = fetch_attendance_records(api_key=api_key, base_url=base_url)
     if not attendances:
         logger.info("No attendance records returned from Rock RMS.")
         return {"updated": 0, "not_found": 0}
@@ -271,7 +300,7 @@ def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
     stats = {"updated": 0, "not_found": 0}
 
     for rock_id, att_date in latest.items():
-        member = db.query(Member).filter(Member.rock_id == rock_id).first()
+        member = db.query(Member).filter(Member.rock_id == rock_id, Member.account_id == account_id).first()
         if not member:
             stats["not_found"] += 1
             continue
@@ -287,7 +316,12 @@ def sync_attendance_from_rock(db: Session) -> Dict[str, int]:
     return stats
 
 
-def run_full_sync(db: Session) -> dict:
+def run_full_sync(
+    db: Session,
+    account_id: Optional[int] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> dict:
     """
     Run a full Rock RMS sync: members + attendance.
 
@@ -300,14 +334,14 @@ def run_full_sync(db: Session) -> dict:
     Returns:
         Combined stats dict.
     """
-    if not _is_configured():
+    if not _is_configured(api_key):
         return {
             "rock_sync_enabled": False,
             "message": "ROCK_HALLMARK_API_KEY not set — running in standalone mode.",
         }
 
-    member_stats = sync_members_from_rock(db)
-    attendance_stats = sync_attendance_from_rock(db)
+    member_stats = sync_members_from_rock(db, account_id=account_id, api_key=api_key, base_url=base_url)
+    attendance_stats = sync_attendance_from_rock(db, account_id=account_id, api_key=api_key, base_url=base_url)
 
     return {
         "rock_sync_enabled": True,

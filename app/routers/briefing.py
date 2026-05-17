@@ -6,14 +6,26 @@ import os
 from typing import List, Optional, Literal
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Member, Visitor, CareNote, PrayerRequest
-from app.services.marge import generate_morning_briefing, generate_ai_briefing, render_briefing_text, ai_provider_name
+from app.models import AccountPastorProfile, Member, Visitor, CareNote, PrayerRequest
+from app.services.marge import (
+    ai_provider_name,
+    generate_ai_briefing,
+    generate_morning_briefing,
+    render_briefing_text,
+)
 from app.services.demo_data import build_demo_briefing
+from app.services.accounts import (
+    PASTORAL_ROLES,
+    account_access_from_token,
+    account_id,
+    require_role,
+    scoped_query,
+)
 
 router = APIRouter(prefix="/briefing", tags=["briefing"])
 
@@ -89,24 +101,41 @@ class BriefingResponse(BaseModel):
 @router.get("/today", response_model=BriefingResponse, summary="Get today's morning briefing")
 def get_today_briefing(
     mode: Literal["auto", "demo", "live"] = Query("auto"),
+    x_marge_account_token: Optional[str] = Header(None),
     db: Session = Depends(get_db),
 ):
-    pastor_name = os.getenv("PASTOR_NAME", "Pastor")
-    church_name = os.getenv("CHURCH_NAME", "your church")
+    access = account_access_from_token(db, x_marge_account_token)
+    require_role(access, PASTORAL_ROLES, "view the morning briefing")
+    account = access.account
+    account_profile = None
+    if account:
+        account_profile = db.query(AccountPastorProfile).filter(AccountPastorProfile.account_id == account.id).first()
+
+    pastor_name = (
+        (account_profile.pastor_name if account_profile else None)
+        or (account.pastor_name if account else None)
+        or os.getenv("PASTOR_NAME", "Nathan")
+    )
+    pastor_name = _briefing_name(pastor_name)
+    church_name = (
+        (account_profile.church_name if account_profile else None)
+        or (account.church_name if account else None)
+        or os.getenv("CHURCH_NAME", "your church")
+    )
 
     stats = {
-        "members": db.query(Member).count(),
-        "visitors": db.query(Visitor).count(),
-        "care_cases": db.query(CareNote).count(),
-        "prayer_requests": db.query(PrayerRequest).count(),
+        "members": scoped_query(db.query(Member), Member, account).count(),
+        "visitors": scoped_query(db.query(Visitor), Visitor, account).count(),
+        "care_cases": scoped_query(db.query(CareNote), CareNote, account).count(),
+        "prayer_requests": scoped_query(db.query(PrayerRequest), PrayerRequest, account).count(),
     }
     has_live_data = any(stats.values())
 
-    if mode == "demo" or (mode == "auto" and not has_live_data):
+    if mode == "demo" or (mode == "auto" and not account and not has_live_data):
         demo = build_demo_briefing(pastor_name=pastor_name, church_name=church_name)
         return BriefingResponse(**demo)
 
-    briefing = generate_morning_briefing(db, pastor_name=pastor_name, church_name=church_name)
+    briefing = generate_morning_briefing(db, pastor_name=pastor_name, church_name=church_name, account_id=account_id(account))
     plain_text = render_briefing_text(briefing)
     ai_text = generate_ai_briefing(briefing, pastor_name=pastor_name, church_name=church_name)
 
@@ -129,6 +158,11 @@ def get_today_briefing(
         ai_provider=ai_provider_name(),
         stats=stats,
     )
+
+
+def _briefing_name(name: str) -> str:
+    cleaned = (name or "Pastor").strip()
+    return cleaned[7:].strip() if cleaned.lower().startswith("pastor ") else cleaned
 
 
 def _member_to_brief(m) -> dict:

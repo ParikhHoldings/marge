@@ -14,7 +14,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -22,8 +22,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.database import init_db
-from app.routers import briefing, visitors, members, care
+from app.routers import assistant, briefing, visitors, members, care, drafts
 from app.routers import chat
+from app.runtime_config import assert_production_runtime_safe
+from app.services.accounts import session_cookie_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,6 +40,7 @@ logger = logging.getLogger("marge")
 async def lifespan(app: FastAPI):
     """Initialize the database on startup."""
     logger.info("Marge is waking up. Initializing database…")
+    assert_production_runtime_safe()
     init_db()
     logger.info("Database ready. Good morning, Pastor.")
     yield
@@ -60,18 +63,36 @@ app = FastAPI(
 # CORS — allow all origins in dev; tighten in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_origins=[origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()] or ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def marge_session_cookie_to_header(request: Request, call_next):
+    """
+    Allow same-origin browser sessions to use an HttpOnly cookie while keeping
+    existing routers and MCP/API clients on X-Marge-Account-Token.
+    """
+    has_header = any(key.lower() == b"x-marge-account-token" for key, _value in request.scope.get("headers", []))
+    if not has_header:
+        token = request.cookies.get(session_cookie_name())
+        if token:
+            headers = list(request.scope.get("headers", []))
+            headers.append((b"x-marge-account-token", token.encode("latin-1")))
+            request.scope["headers"] = headers
+    return await call_next(request)
+
 # ── Routers ───────────────────────────────────────────────────────────────────
 
 app.include_router(briefing.router)
+app.include_router(assistant.router)
 app.include_router(visitors.router)
 app.include_router(members.router)
 app.include_router(care.router)
+app.include_router(drafts.router)
 app.include_router(chat.router)
 
 # ── Static files (frontend) ───────────────────────────────────────────────────

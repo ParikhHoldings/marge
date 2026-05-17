@@ -8,7 +8,8 @@ Usage:
     python mcp_server/server.py
 
 Environment variables:
-    MARGE_API_URL   Base URL of your Marge instance (default: http://localhost:8000)
+    MARGE_API_URL         Base URL of your Marge instance (default: http://localhost:8000)
+    MARGE_ACCOUNT_TOKEN   Optional church workspace token from /assistant/signup
 
 Claude Desktop config (~/.claude/claude_desktop_config.json):
     {
@@ -17,7 +18,8 @@ Claude Desktop config (~/.claude/claude_desktop_config.json):
           "command": "python",
           "args": ["/path/to/marge/mcp_server/server.py"],
           "env": {
-            "MARGE_API_URL": "https://your-marge-instance.railway.app"
+            "MARGE_API_URL": "https://your-marge-instance.railway.app",
+            "MARGE_ACCOUNT_TOKEN": "marge_..."
           }
         }
       }
@@ -36,6 +38,7 @@ from mcp import types
 # ── Config ────────────────────────────────────────────────────────────────────
 
 MARGE_API_URL = os.getenv("MARGE_API_URL", "http://localhost:8000").rstrip("/")
+MARGE_ACCOUNT_TOKEN = os.getenv("MARGE_ACCOUNT_TOKEN", "").strip()
 
 # ── Server ────────────────────────────────────────────────────────────────────
 
@@ -49,25 +52,187 @@ server = Server(
 def _get(path: str, params: dict = None) -> dict:
     """Synchronous GET to Marge API."""
     with httpx.Client(timeout=15) as client:
-        r = client.get(f"{MARGE_API_URL}{path}", params=params)
+        r = client.get(f"{MARGE_API_URL}{path}", params=params, headers=_headers())
         r.raise_for_status()
         return r.json()
 
 
-def _post(path: str, body: dict) -> dict:
+def _post(path: str, body: dict, params: dict = None) -> dict:
     """Synchronous POST to Marge API."""
     with httpx.Client(timeout=15) as client:
-        r = client.post(f"{MARGE_API_URL}{path}", json=body)
+        r = client.post(f"{MARGE_API_URL}{path}", params=params, json=body, headers=_headers())
         r.raise_for_status()
         return r.json()
+
+
+def _delete(path: str) -> dict:
+    """Synchronous DELETE to Marge API."""
+    with httpx.Client(timeout=15) as client:
+        r = client.delete(f"{MARGE_API_URL}{path}", headers=_headers())
+        r.raise_for_status()
+        return r.json()
+
+
+def _patch(path: str, body: dict) -> dict:
+    """Synchronous PATCH to Marge API."""
+    with httpx.Client(timeout=15) as client:
+        r = client.patch(f"{MARGE_API_URL}{path}", json=body, headers=_headers())
+        r.raise_for_status()
+        return r.json()
+
+
+def _headers() -> dict:
+    headers = {"Accept": "application/json"}
+    if MARGE_ACCOUNT_TOKEN:
+        headers["X-Marge-Account-Token"] = MARGE_ACCOUNT_TOKEN
+    return headers
 
 
 def _find_member(name: str) -> dict | None:
     """Find first member matching name search."""
-    results = _get("/members/", params={"search": name})
+    results = _get("/members/", params={"q": name})
     if isinstance(results, list) and results:
         return results[0]
     return None
+
+
+def _normalize_care_category(category: str) -> str:
+    """Map agent-friendly labels to the backend's current care enum."""
+    value = (category or "general").lower().strip()
+    if value in {"hospital", "crisis", "grief", "general"}:
+        return value
+    if value in {"counseling", "other", "financial", "health", "family", "followup"}:
+        return "general"
+    return "general"
+
+
+def _format_desk_item(item: dict) -> str:
+    title = item.get("title") or "Untitled"
+    detail = item.get("detail") or item.get("subtitle") or ""
+    action = item.get("action") or "Review"
+    priority = item.get("priority") or "medium"
+    return f"  • {title} [{priority}] — {action}" + (f": {detail}" if detail else "")
+
+
+def _format_action(action: dict) -> str:
+    status = action.get("status", "pending")
+    action_type = action.get("action_type", "assistant_action")
+    privacy = action.get("privacy_level", "pastoral")
+    title = action.get("title") or "Untitled"
+    description = action.get("description") or ""
+    line = f"  • #{action.get('id')} {title} [{status}, {action_type}, {privacy}]"
+    return f"{line} — {description}" if description else line
+
+
+def _format_integration(item: dict) -> str:
+    display = item.get("display_name") or item.get("provider")
+    status = (item.get("status") or "planned").replace("_", " ")
+    write = "write enabled" if item.get("write_enabled") else "read/review only"
+    verified = item.get("verified_at")
+    ready_statuses = {"connected", "configured", "available"}
+    credential_state = ""
+    if verified:
+        credential_state = f", checked {verified}"
+    elif item.get("provider") != "mcp" and item.get("status") in ready_statuses:
+        credential_state = ", needs credential check before sync"
+    hint = item.get("config_hint") or item.get("secure_note") or ""
+    return f"  • {display}: {status}, {write}{credential_state}" + (f" — {hint}" if hint else "")
+
+
+def _format_chat_message(message: dict) -> str:
+    role = "Pastor" if message.get("role") == "user" else "Marge"
+    content = (message.get("content") or "").strip()
+    intent = message.get("intent") or "chat"
+    return f"  • {role} [{intent}]: {content}"
+
+
+def _format_tell_marge_response(result: dict) -> str:
+    lines = [result.get("reply") or "Got it."]
+    metadata = []
+    if result.get("intent"):
+        metadata.append(f"intent={result['intent']}")
+    if "saved" in result:
+        metadata.append(f"saved={bool(result.get('saved'))}")
+    if result.get("mode"):
+        metadata.append(f"mode={result['mode']}")
+    if metadata:
+        lines.extend(["", "Response metadata: " + ", ".join(metadata)])
+
+    profile = result.get("profile") or {}
+    if profile:
+        missing = profile.get("missing_fields") or []
+        lines.append(
+            f"Profile: {profile.get('completion_percent', 0)}% complete"
+            + (f"; missing {', '.join(missing)}" if missing else "; complete")
+        )
+
+    actions = result.get("actions") or []
+    if actions:
+        lines.extend(["", "Returned action cards:"])
+        lines.extend(_format_desk_item(action) for action in actions[:8])
+
+    prompts = result.get("suggested_prompts") or []
+    if prompts:
+        lines.extend(["", "Suggested prompts:"])
+        lines.extend(f"  • {prompt}" for prompt in prompts[:6])
+    return "\n".join(lines)
+
+
+def _compact_payload(payload: dict, limit: int = 800) -> str:
+    rendered = json.dumps(payload, indent=2, default=str)
+    if len(rendered) <= limit:
+        return rendered
+    return rendered[: limit - 3].rstrip() + "..."
+
+
+def _provider_display_name(provider: str) -> str:
+    names = {
+        "google_workspace": "Google Workspace",
+        "microsoft_365": "Microsoft 365",
+        "planning_center": "Planning Center",
+        "breeze": "Breeze",
+        "rock": "Rock RMS",
+        "mcp": "MCP",
+    }
+    return names.get(provider, provider.replace("_", " ").title())
+
+
+def _http_error_detail(exc: httpx.HTTPStatusError) -> str:
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        return exc.response.text or str(exc)
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, str):
+            return detail
+        if detail is not None:
+            return json.dumps(detail, default=str)
+    return json.dumps(payload, default=str)
+
+
+def _sync_needs_credential_check(exc: httpx.HTTPStatusError) -> bool:
+    if exc.response.status_code != 409:
+        return False
+    detail = _http_error_detail(exc).lower()
+    return "check credentials" in detail and "before syncing" in detail
+
+
+def _format_sync_precheck_verification(provider: str, result: dict) -> str:
+    display = _provider_display_name(result.get("provider") or provider)
+    identity = result.get("identity") or {}
+    identity_bits = []
+    for key in ["email", "display_name", "name", "id", "sample_people_access"]:
+        if key in identity and identity.get(key) is not None:
+            identity_bits.append(f"{key}: {identity[key]}")
+    lines = [
+        f"{display} credentials verified at {result.get('verified_at')} without syncing ministry data.",
+        "I did not import people, email, calendar, or attendance context, and I did not queue actions.",
+        "Ask to sync this connector again when you want Marge to import fresh ministry context.",
+    ]
+    if identity_bits:
+        lines.append("Non-secret identity check: " + ", ".join(identity_bits))
+    return "\n".join(lines)
 
 
 # ── Tool Definitions ──────────────────────────────────────────────────────────
@@ -109,9 +274,21 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "first_name": {"type": "string"},
                     "last_name": {"type": "string"},
+                    "email": {
+                        "type": "string",
+                        "description": "Optional email address. Include it when available so Marge can queue a reviewable welcome email draft.",
+                    },
+                    "phone": {
+                        "type": "string",
+                        "description": "Optional phone number for pastoral follow-up.",
+                    },
                     "visit_date": {
                         "type": "string",
                         "description": "Date of visit in YYYY-MM-DD format. Defaults to today if not provided.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "How they came in, such as walk-in, web, referral, or Sunday card.",
                     },
                     "notes": {
                         "type": "string",
@@ -145,6 +322,21 @@ async def list_tools() -> list[types.Tool]:
                     },
                 },
                 "required": ["member_name", "category", "description"],
+            },
+        ),
+        types.Tool(
+            name="list_care_cases",
+            description="List active or resolved pastoral care cases.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by active or resolved.",
+                        "enum": ["active", "resolved"],
+                    }
+                },
+                "required": [],
             },
         ),
         types.Tool(
@@ -189,6 +381,26 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="list_prayer_requests",
+            description="List prayer requests, excluding private requests unless include_private is true.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by active, answered, or expired.",
+                        "enum": ["active", "answered", "expired"],
+                    },
+                    "include_private": {
+                        "type": "boolean",
+                        "description": "Include private requests if the pastor is allowed to see them.",
+                        "default": False,
+                    },
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
             name="add_member_note",
             description=(
                 "Add a pastoral note to a member's record. "
@@ -227,15 +439,257 @@ async def list_tools() -> list[types.Tool]:
                         "type": "string",
                         "description": "Name of the member to draft a message for.",
                     },
+                    "situation": {
+                        "type": "string",
+                        "description": "Optional context such as hospital, grief, job loss, birthday, or general check-in.",
+                    },
                 },
                 "required": ["member_name"],
             },
         ),
         types.Tool(
+            name="get_assistant_desk",
+            description=(
+                "Get Marge's connected secretary desk: greeting, first-run setup steps, priorities, "
+                "drafts, calendar suggestions, approval queue, connector status, and suggested prompts. "
+                "Use this before deciding what Marge should do next."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": "Use auto for normal account-scoped work, live for real rows, or demo for sample data.",
+                        "enum": ["auto", "live", "demo"],
+                        "default": "auto",
+                    }
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="list_assistant_chat_history",
+            description=(
+                "List recent persisted Marge chat turns for the current church workspace. "
+                "Use this to preserve first-run context and avoid asking the pastor to repeat what he already taught Marge."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="clear_assistant_chat_history",
+            description=(
+                "Clear persisted Marge chat history for the current church workspace. "
+                "This removes conversation transcript rows only; saved profile context, people, care, prayer, and approvals remain."
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        types.Tool(
+            name="get_ministry_profile",
+            description=(
+                "Get the current church workspace profile Marge uses for onboarding, drafting voice, "
+                "follow-up burden, secure connector setup, weekly rhythm, and guardrails."
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        types.Tool(
+            name="update_ministry_profile",
+            description=(
+                "Save pastor/church context Marge should remember. Use this for first-run onboarding "
+                "answers such as role, church context, tools in use, follow-up pain, drafting voice, weekly rhythm, and guardrails."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pastor_name": {"type": "string"},
+                    "church_name": {"type": "string"},
+                    "role_title": {"type": "string"},
+                    "congregation_size": {"type": "string"},
+                    "church_context": {"type": "string"},
+                    "ministry_priorities": {"type": "string"},
+                    "followup_pain": {"type": "string"},
+                    "weekly_rhythm": {"type": "string"},
+                    "communication_style": {"type": "string"},
+                    "tools_in_use": {"type": "string"},
+                    "guardrails": {"type": "string"},
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="list_integrations",
+            description=(
+                "List Marge connector status for Rock RMS, Planning Center, Breeze, Google Workspace, "
+                "Microsoft 365, and local MCP. Use this before asking the pastor to connect a tool."
+            ),
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        types.Tool(
+            name="start_integration_setup",
+            description=(
+                "Start secure connector setup for a provider. Returns OAuth authorization or server config guidance. "
+                "Never ask the pastor to paste passwords, OAuth secrets, or API keys into chat."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "description": "Provider key.",
+                        "enum": ["google_workspace", "microsoft_365", "planning_center", "breeze", "rock", "mcp"],
+                    }
+                },
+                "required": ["provider"],
+            },
+        ),
+        types.Tool(
+            name="sync_integration",
+            description=(
+                "Sync connected external context into Marge. This reads provider context and queues review actions; "
+                "it should not send messages or write to external systems. If credentials have not been checked, "
+                "this tool verifies them first without syncing data, then stops and asks for an explicit sync retry."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "enum": ["google_workspace", "microsoft_365", "planning_center", "breeze", "rock"],
+                    },
+                    "email_limit": {"type": "integer", "default": 5},
+                    "people_limit": {"type": "integer", "default": 25},
+                    "calendar_days": {"type": "integer", "default": 14},
+                },
+                "required": ["provider"],
+            },
+        ),
+        types.Tool(
+            name="verify_integration",
+            description=(
+                "Verify that a connector credential works without syncing ministry data or queuing actions. "
+                "Use this after secure setup and before asking Marge to sync."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "enum": ["google_workspace", "microsoft_365", "planning_center", "breeze", "rock", "mcp"],
+                    }
+                },
+                "required": ["provider"],
+            },
+        ),
+        types.Tool(
+            name="disconnect_integration",
+            description=(
+                "Disconnect the current Marge user's OAuth credential for a provider. "
+                "This removes Marge's encrypted token payload and disables writeback if no credentials remain."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "enum": ["google_workspace", "microsoft_365", "planning_center"],
+                    }
+                },
+                "required": ["provider"],
+            },
+        ),
+        types.Tool(
+            name="list_connected_context",
+            description="List synced inbox, calendar, people, or connector context Marge has cached for the current church workspace.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string"},
+                    "item_type": {
+                        "type": "string",
+                        "description": "Examples: email, calendar_event, person, sync_summary.",
+                    },
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="list_approval_queue",
+            description=(
+                "List Marge's assistant action queue. Pending actions are drafts, setup steps, synced-context reviews, "
+                "or external write proposals waiting for pastor review."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status, or all.",
+                        "enum": ["pending", "approved", "executed", "skipped", "all"],
+                        "default": "pending",
+                    },
+                    "limit": {"type": "integer", "default": 25},
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="prepare_approval_queue",
+            description=(
+                "Ask Marge to prepare today's proactive work into reviewable assistant actions. "
+                "This queues drafts/setup proposals; it does not send or write externally."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["auto", "live", "demo"],
+                        "default": "auto",
+                    }
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="approve_action",
+            description="Approve one assistant action by ID. External writes still require provider policy and a separate execute step.",
+            inputSchema={
+                "type": "object",
+                "properties": {"action_id": {"type": "integer"}},
+                "required": ["action_id"],
+            },
+        ),
+        types.Tool(
+            name="execute_action",
+            description=(
+                "Execute an already-approved assistant action by ID. Use only after the pastor has reviewed the exact action."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"action_id": {"type": "integer"}},
+                "required": ["action_id"],
+            },
+        ),
+        types.Tool(
+            name="skip_action",
+            description="Skip an assistant action by ID when the pastor decides not to proceed.",
+            inputSchema={
+                "type": "object",
+                "properties": {"action_id": {"type": "integer"}},
+                "required": ["action_id"],
+            },
+        ),
+        types.Tool(
             name="tell_marge",
             description=(
-                "Tell Marge something in plain English. She will acknowledge it, confirm what she logged, "
-                "and suggest a follow-up action. "
+                "Chat with Marge in plain English. She can answer from the current desk, save ministry context, "
+                "log pastoral updates, prepare drafts, start secure connector setup, and suggest follow-up actions. "
                 "Examples: 'I visited Martha today, she is doing better', "
                 "'Tom Henderson mentioned he lost his job', "
                 "'The Wilson family has been absent for a month — can you flag them?'"
@@ -246,6 +700,12 @@ async def list_tools() -> list[types.Tool]:
                     "message": {
                         "type": "string",
                         "description": "Your plain-English message to Marge.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Use live for real workspace data or demo for sample data.",
+                        "enum": ["live", "demo"],
+                        "default": "live",
                     }
                 },
                 "required": ["message"],
@@ -269,7 +729,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
         elif name == "list_members":
             search = arguments.get("search", "")
-            members = _get("/members/", params={"search": search} if search else {})
+            members = _get("/members/", params={"q": search} if search else {})
             if not members:
                 return text("No members found matching that search.")
             lines = [f"Found {len(members)} member(s):"]
@@ -283,13 +743,18 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             body = {
                 "first_name": arguments["first_name"],
                 "last_name": arguments["last_name"],
+                "email": arguments.get("email"),
+                "phone": arguments.get("phone"),
                 "visit_date": visit_date,
+                "source": arguments.get("source"),
                 "notes": arguments.get("notes", ""),
             }
+            body = {key: value for key, value in body.items() if value not in (None, "")}
             result = _post("/visitors/", body)
+            recipient_note = " with recipient details" if result.get("email") else ""
             return text(
                 f"Logged visitor: {result['full_name']} visited on {result['visit_date']}. "
-                f"Marge will start a follow-up sequence automatically."
+                f"Marge queued a welcome draft for pastor review{recipient_note}; nothing was sent."
             )
 
         elif name == "log_care_event":
@@ -298,7 +763,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 return text(f"Could not find a member named '{arguments['member_name']}'. Try list_members to search.")
             body = {
                 "member_id": member["id"],
-                "category": arguments["category"],
+                "category": _normalize_care_category(arguments["category"]),
                 "description": arguments["description"],
             }
             result = _post("/care/", body)
@@ -306,6 +771,22 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 f"Care case opened for {member['full_name']} (ID: {result['id']}). "
                 f"Category: {result['category']}. Marge will surface this in the morning briefing."
             )
+
+        elif name == "list_care_cases":
+            params = {}
+            if arguments.get("status"):
+                params["status"] = arguments["status"]
+            cases = _get("/care/", params=params)
+            if not cases:
+                return text("No care cases found.")
+            lines = [f"Found {len(cases)} care case(s):"]
+            for case in cases[:20]:
+                last = case.get("last_contact") or "no contact logged"
+                lines.append(
+                    f"  • {case.get('member_name', 'Unknown')} (care ID: {case['id']}) "
+                    f"[{case['category']}, {case['status']}] — last contact: {last}"
+                )
+            return text("\n".join(lines))
 
         elif name == "mark_contacted":
             body = {"note": arguments.get("note", "Contacted via Marge")}
@@ -334,6 +815,27 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             privacy = "privately" if result.get("is_private") else "and added to the prayer list"
             return text(f"Prayer request {name_part}logged {privacy}. Marge will track it and prompt you to follow up.")
 
+        elif name == "list_prayer_requests":
+            params = {}
+            if arguments.get("status"):
+                params["status"] = arguments["status"]
+            if "include_private" in arguments:
+                params["include_private"] = arguments["include_private"]
+            prayers = _get("/care/prayers/", params=params)
+            if not prayers:
+                return text("No prayer requests found.")
+            lines = [f"Found {len(prayers)} prayer request(s):"]
+            for prayer in prayers[:20]:
+                privacy = "private" if prayer.get("is_private") else "public"
+                who = prayer.get("member_name") or prayer.get("submitted_by") or "Anonymous"
+                snippet = prayer.get("request_text", "")
+                if len(snippet) > 90:
+                    snippet = snippet[:89].rstrip() + "…"
+                lines.append(
+                    f"  • {who} (prayer ID: {prayer['id']}, {privacy}, {prayer['status']}) — {snippet}"
+                )
+            return text("\n".join(lines))
+
         elif name == "add_member_note":
             member = _find_member(arguments["member_name"])
             if not member:
@@ -352,13 +854,235 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             member = _find_member(arguments["member_name"])
             if not member:
                 return text(f"Could not find a member named '{arguments['member_name']}'. Try list_members to search.")
-            result = _get(f"/members/{member['id']}/draft/care")
+            result = _post("/drafts/", {
+                "kind": "care",
+                "member_id": member["id"],
+                "situation": arguments.get("situation", "general check-in"),
+            })
             draft = result.get("draft") or result.get("message") or json.dumps(result)
             return text(f"Draft for {member['full_name']}:\n\n{draft}")
 
+        elif name == "get_assistant_desk":
+            mode = arguments.get("mode") or "auto"
+            data = _get("/assistant/desk", params={"mode": mode})
+            lines = [
+                data.get("greeting") or "Marge assistant desk",
+                "",
+                f"Mode: {data.get('mode')} | Pastor: {data.get('pastor_name')} | Church: {data.get('church_name')}",
+                f"Profile: {data.get('profile', {}).get('completion_percent', 0)}% complete",
+                "",
+                "Proactive summary:",
+                data.get("proactive_summary") or "No summary available.",
+            ]
+            setup = data.get("setup_steps") or []
+            if setup:
+                lines.extend(["", "Next setup steps:"])
+                lines.extend(_format_desk_item(item) for item in setup[:5])
+            priorities = data.get("priorities") or []
+            if priorities:
+                lines.extend(["", "Priorities:"])
+                lines.extend(_format_desk_item(item) for item in priorities[:5])
+            approvals = data.get("approvals") or []
+            if approvals:
+                lines.extend(["", "Approval desk:"])
+                lines.extend(_format_desk_item(item) for item in approvals[:5])
+            integrations = data.get("integrations") or []
+            if integrations:
+                lines.extend(["", "Connectors:"])
+                lines.extend(_format_integration(item) for item in integrations[:8])
+            prompts = data.get("suggested_prompts") or []
+            if prompts:
+                lines.extend(["", "Suggested prompts:"])
+                lines.extend(f"  • {prompt}" for prompt in prompts[:5])
+            return text("\n".join(lines))
+
+        elif name == "list_assistant_chat_history":
+            messages = _get("/assistant/chat/history", params={"limit": arguments.get("limit") or 20})
+            if not messages:
+                return text("No persisted assistant chat history found for this workspace.")
+            lines = [f"Recent assistant chat history ({len(messages)} message(s)):"]
+            lines.extend(_format_chat_message(message) for message in messages)
+            return text("\n".join(lines))
+
+        elif name == "clear_assistant_chat_history":
+            result = _delete("/assistant/chat/history")
+            return text(result.get("message") or f"Cleared {result.get('messages_deleted', 0)} assistant chat message(s).")
+
+        elif name == "get_ministry_profile":
+            profile = _get("/assistant/profile")
+            missing = profile.get("missing_fields") or []
+            lines = [
+                f"Profile completion: {profile.get('completion_percent', 0)}%",
+                f"Pastor: {profile.get('pastor_name') or 'not set'}",
+                f"Church: {profile.get('church_name') or 'not set'}",
+                f"Role: {profile.get('role_title') or 'not set'}",
+                f"Church context: {profile.get('church_context') or 'not set'}",
+                f"Follow-up burden: {profile.get('followup_pain') or 'not set'}",
+                f"Tools in use: {profile.get('tools_in_use') or 'not set'}",
+                f"Drafting voice: {profile.get('communication_style') or 'not set'}",
+                f"Weekly rhythm: {profile.get('weekly_rhythm') or 'not set'}",
+                f"Guardrails: {profile.get('guardrails') or 'not set'}",
+                f"Missing fields: {', '.join(missing) if missing else 'none'}",
+            ]
+            return text("\n".join(lines))
+
+        elif name == "update_ministry_profile":
+            allowed = {
+                "pastor_name",
+                "church_name",
+                "role_title",
+                "congregation_size",
+                "church_context",
+                "ministry_priorities",
+                "followup_pain",
+                "weekly_rhythm",
+                "communication_style",
+                "tools_in_use",
+                "guardrails",
+            }
+            body = {key: value for key, value in arguments.items() if key in allowed and value not in (None, "")}
+            if not body:
+                return text("No ministry profile fields were provided to update.")
+            profile = _patch("/assistant/profile", body)
+            missing = profile.get("missing_fields") or []
+            return text(
+                "Saved ministry profile context for Marge.\n"
+                f"Profile completion: {profile.get('completion_percent', 0)}%.\n"
+                f"Missing fields: {', '.join(missing) if missing else 'none'}."
+            )
+
+        elif name == "list_integrations":
+            integrations = _get("/assistant/integrations")
+            if not integrations:
+                return text("No integrations are registered.")
+            return text("Connector status:\n" + "\n".join(_format_integration(item) for item in integrations))
+
+        elif name == "start_integration_setup":
+            provider = arguments["provider"]
+            setup = _post(f"/assistant/integrations/{provider}/start", {})
+            lines = [
+                f"{setup.get('display_name') or provider}: {setup.get('status')}",
+                setup.get("secure_note") or "Use secure setup. Do not paste secrets into chat.",
+            ]
+            if setup.get("authorization_url"):
+                lines.append(f"Authorization URL: {setup['authorization_url']}")
+            if setup.get("missing_config"):
+                lines.append("Server config needed: " + ", ".join(setup["missing_config"]))
+            instructions = setup.get("instructions") or []
+            if instructions:
+                lines.extend(["Instructions:"] + [f"  • {item}" for item in instructions])
+            return text("\n".join(lines))
+
+        elif name == "sync_integration":
+            provider = arguments["provider"]
+            params = {
+                "email_limit": arguments.get("email_limit", 5),
+                "people_limit": arguments.get("people_limit", 25),
+                "calendar_days": arguments.get("calendar_days", 14),
+            }
+            try:
+                result = _post(f"/assistant/integrations/{provider}/sync", {}, params=params)
+            except httpx.HTTPStatusError as exc:
+                if not _sync_needs_credential_check(exc):
+                    raise
+                try:
+                    verification = _post(f"/assistant/integrations/{provider}/verify", {})
+                except httpx.HTTPStatusError as verify_exc:
+                    return text(
+                        f"I stopped before syncing {_provider_display_name(provider)} because credentials need to be checked first.\n"
+                        f"The safe no-sync credential check failed: {_http_error_detail(verify_exc)}"
+                    )
+                return text(_format_sync_precheck_verification(provider, verification))
+            return text(
+                f"{result.get('provider') or provider} sync {result.get('status')} at {result.get('synced_at')}.\n"
+                f"Seen: {result.get('items_seen', 0)} | Created: {result.get('items_created', 0)} | "
+                f"Updated: {result.get('items_updated', 0)} | Actions prepared: {result.get('actions_prepared', 0)}.\n"
+                f"{result.get('message') or ''}"
+            )
+
+        elif name == "verify_integration":
+            provider = arguments["provider"]
+            result = _post(f"/assistant/integrations/{provider}/verify", {})
+            identity = result.get("identity") or {}
+            identity_bits = []
+            for key in ["email", "display_name", "name", "id", "sample_people_access"]:
+                if key in identity and identity.get(key) is not None:
+                    identity_bits.append(f"{key}: {identity[key]}")
+            scope = result.get("credential_scope") or "server"
+            return text(
+                f"{result.get('provider') or provider} verification {result.get('status')} at {result.get('verified_at')}.\n"
+                f"Credential scope: {scope}.\n"
+                f"{result.get('message') or ''}"
+                + (f"\nIdentity: {', '.join(identity_bits)}" if identity_bits else "")
+            )
+
+        elif name == "disconnect_integration":
+            provider = arguments["provider"]
+            result = _delete(f"/assistant/integrations/{provider}")
+            return text(
+                f"{result.get('provider') or provider} disconnect {result.get('status')} at {result.get('disconnected_at')}.\n"
+                f"Removed credentials: {result.get('removed_credentials', 0)} | "
+                f"Remaining credentials: {result.get('remaining_credentials', 0)} | "
+                f"Writeback enabled: {bool(result.get('write_enabled'))}.\n"
+                f"{result.get('message') or ''}"
+            )
+
+        elif name == "list_connected_context":
+            params = {}
+            if arguments.get("provider"):
+                params["provider"] = arguments["provider"]
+            if arguments.get("item_type"):
+                params["item_type"] = arguments["item_type"]
+            if arguments.get("limit"):
+                params["limit"] = arguments["limit"]
+            items = _get("/assistant/connected-items", params=params)
+            if not items:
+                return text("No synced connected context found for this workspace.")
+            lines = [f"Found {len(items)} connected context item(s):"]
+            for item in items[:30]:
+                when = item.get("occurred_at") or item.get("created_at") or "unknown date"
+                title = item.get("title") or "Untitled"
+                snippet = item.get("snippet") or item.get("subtitle") or ""
+                lines.append(f"  • #{item.get('id')} {item.get('provider')} {item.get('item_type')} — {title} ({when})" + (f": {snippet}" if snippet else ""))
+            return text("\n".join(lines))
+
+        elif name == "list_approval_queue":
+            params = {
+                "status": arguments.get("status") or "pending",
+                "limit": arguments.get("limit") or 25,
+            }
+            actions = _get("/assistant/actions", params=params)
+            if not actions:
+                return text("No assistant actions found for that status.")
+            lines = [f"Found {len(actions)} assistant action(s):"]
+            lines.extend(_format_action(action) for action in actions)
+            return text("\n".join(lines))
+
+        elif name == "prepare_approval_queue":
+            mode = arguments.get("mode") or "auto"
+            actions = _post("/assistant/actions/prepare", {}, params={"mode": mode})
+            if not actions:
+                return text("Marge did not find anything to queue right now.")
+            lines = [f"Prepared {len(actions)} assistant action(s) for pastor review:"]
+            lines.extend(_format_action(action) for action in actions)
+            return text("\n".join(lines))
+
+        elif name == "approve_action":
+            action = _post(f"/assistant/actions/{arguments['action_id']}/approve", {})
+            return text("Approved assistant action:\n" + _format_action(action))
+
+        elif name == "execute_action":
+            action = _post(f"/assistant/actions/{arguments['action_id']}/execute", {})
+            payload = action.get("payload") or {}
+            return text("Executed assistant action:\n" + _format_action(action) + "\nPayload:\n" + _compact_payload(payload))
+
+        elif name == "skip_action":
+            action = _post(f"/assistant/actions/{arguments['action_id']}/skip", {})
+            return text("Skipped assistant action:\n" + _format_action(action))
+
         elif name == "tell_marge":
-            result = _post("/chat/", {"message": arguments["message"]})
-            return text(result.get("reply", "Got it."))
+            result = _post("/assistant/chat", {"message": arguments["message"], "mode": arguments.get("mode") or "live"})
+            return text(_format_tell_marge_response(result))
 
         else:
             return text(f"Unknown tool: {name}")

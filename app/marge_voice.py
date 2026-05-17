@@ -25,13 +25,13 @@ BRIEFING_EMPTY_STATE = (
 
 FOLLOW_UP_DAY1_TEMPLATE = (
     "Hi {first_name}, just wanted to say how glad we were to have you with us Sunday! "
-    "Pastor {pastor_name} was especially glad you came. "
+    "{pastor_name} was especially glad you came. "
     "No pressure at all — just wanted you to know you have a place here any time. "
     "— {church_name}"
 )
 
 FOLLOW_UP_DAY3_TEMPLATE = (
-    "Hey {first_name}! This is Pastor {pastor_name} from {church_name}. "
+    "Hey {first_name}! This is {pastor_name} from {church_name}. "
     "We really enjoyed having you join us a few days ago. "
     "I'd love to grab coffee sometime if you're ever open to it — "
     "no agenda, just a chance to connect. "
@@ -39,7 +39,7 @@ FOLLOW_UP_DAY3_TEMPLATE = (
 )
 
 FOLLOW_UP_WEEK2_TEMPLATE = (
-    "Hi {first_name} — Pastor {pastor_name} here. "
+    "Hi {first_name} — {pastor_name} here. "
     "We've got a {event_or_service} coming up that I think you'd enjoy. "
     "Would love to see you there. "
     "No obligation — just wanted to extend a personal invite. "
@@ -59,33 +59,33 @@ CARE_MESSAGE_HOSPITAL = (
     "Hey {first_name}, just wanted you to know I'm thinking about you and praying for you "
     "as you go through this. You're not alone in it. "
     "Let me know if there's anything you need or if you'd like a visit. "
-    "— Pastor {pastor_name}"
+    "— {pastor_name}"
 )
 
 CARE_MESSAGE_GRIEF = (
     "Hey {first_name}, I've been carrying you in my heart this week. "
     "Grief is hard, and there's no right way to move through it. "
     "I'm here whenever you need to talk, pray, or just sit with someone. "
-    "— Pastor {pastor_name}"
+    "— {pastor_name}"
 )
 
 CARE_MESSAGE_CRISIS = (
     "Hey {first_name}, I heard you're going through a really hard season right now. "
     "I want you to know the church is here for you, and so am I. "
     "Can we find a time to connect this week? "
-    "— Pastor {pastor_name}"
+    "— {pastor_name}"
 )
 
 CARE_MESSAGE_GENERAL = (
     "Hey {first_name}, just thinking about you today and wanted to check in. "
     "How are you doing? I'd love to hear. "
-    "— Pastor {pastor_name}"
+    "— {pastor_name}"
 )
 
 # ── Absence check-in template ─────────────────────────────────────────────────
 
 ABSENCE_CHECKIN_TEMPLATE = (
-    "Hey {first_name}! This is Pastor {pastor_name} — "
+    "Hey {first_name}! This is {pastor_name} — "
     "just noticed we haven't seen you in a little while and wanted to reach out. "
     "No worries if life's been busy — just wanted you to know we miss you "
     "and hope everything's going well. "
@@ -98,14 +98,14 @@ BIRTHDAY_TEMPLATE = (
     "Happy birthday, {first_name}! "
     "Hope your day is full of good things. "
     "Thankful to do life with you. "
-    "— Pastor {pastor_name}"
+    "— {pastor_name}"
 )
 
 ANNIVERSARY_TEMPLATE = (
     "Happy anniversary, {first_name}! "
     "What a blessing to celebrate {years} years together. "
     "Praying for your marriage today. "
-    "— Pastor {pastor_name}"
+    "— {pastor_name}"
 )
 
 # ── Prayer follow-up template ─────────────────────────────────────────────────
@@ -114,7 +114,7 @@ PRAYER_FOLLOWUP_TEMPLATE = (
     "Hey {first_name}, just wanted to check in on your prayer request from {days_ago} days ago — "
     "you mentioned {short_summary}. "
     "Still praying for you. How are things going? "
-    "— Pastor {pastor_name}"
+    "— {pastor_name}"
 )
 
 # ── Post-action confirmations (in-app, Marge's voice) ────────────────────────
