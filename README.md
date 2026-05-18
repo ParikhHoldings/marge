@@ -12,7 +12,7 @@ pip install -r requirements.txt
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env with your values (PASTOR_NAME, CHURCH_NAME, etc.)
+# Edit .env for local database, encryption, sessions, and optional connectors
 
 # 3. Start the API server
 uvicorn app.main:app --reload
@@ -26,12 +26,17 @@ uvicorn app.main:app --reload
 
 ## Morning Briefing (Cron)
 
+The product path is the account-scoped assistant workspace and `/briefing/today`.
+For a cron-style text briefing, target a real workspace with
+`MARGE_ACCOUNT_TOKEN`, `MARGE_ACCOUNT_ID`, or `MARGE_ACCOUNT_SLUG` so Marge does
+not read legacy unscoped rows.
+
 ```bash
 # Run manually
-python3 scripts/morning_briefing.py
+MARGE_ACCOUNT_TOKEN=marge_sess_... python3 scripts/morning_briefing.py
 
 # Schedule for 7 AM daily (cron)
-0 7 * * * cd /path/to/marge && python3 scripts/morning_briefing.py >> /var/log/marge_briefing.log 2>&1
+0 7 * * * cd /path/to/marge && MARGE_ACCOUNT_SLUG=your-church .venv/bin/python scripts/morning_briefing.py >> /var/log/marge_briefing.log 2>&1
 ```
 
 Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to receive briefings via Telegram.
@@ -40,7 +45,8 @@ Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to receive briefings v
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/` | Health check |
+| GET | `/` | Public app/bootstrap pointer with no workspace data |
+| GET | `/health` | Health check |
 | GET | `/briefing/today` | Today's full pastoral briefing |
 | POST | `/visitors/` | Log a new visitor |
 | GET | `/visitors/` | List visitors |
@@ -51,7 +57,7 @@ Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to receive briefings v
 | GET | `/members/{id}` | Member detail + notes |
 | POST | `/members/{id}/notes` | Add pastoral note |
 | GET | `/members/{id}/draft/care` | Draft a care message |
-| POST | `/members/sync/rock` | Sync from Rock RMS |
+| POST | `/members/sync/rock` | Legacy Rock sync; delegates to verified assistant connector sync |
 | POST | `/care/` | Open a care case |
 | GET | `/care/` | List care cases |
 | POST | `/care/{id}/resolve` | Resolve a care case |
@@ -60,7 +66,7 @@ Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to receive briefings v
 | GET | `/care/prayers/` | List prayer requests |
 | PATCH | `/care/prayers/{id}` | Update prayer status |
 | POST | `/drafts/` | Draft a pastoral message for care, visitors, prayer, birthdays, anniversaries, or absence |
-| POST | `/chat/` | Tell Marge a plain-English update |
+| POST | `/chat/` | Legacy compatibility chat; delegates to account-scoped `/assistant/chat` |
 | POST | `/assistant/signup` | Create a church workspace and account-scoped ministry profile |
 | GET | `/assistant/account` | Get the current church workspace from `X-Marge-Account-Token` |
 | POST | `/assistant/sessions` | Exchange a workspace user token for an expiring session token |
@@ -99,8 +105,8 @@ Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` to receive briefings v
 
 Marge can sync members and attendance from Rock RMS automatically.
 
-1. Add a Rock API key through secure connector setup, or set `ROCK_HALLMARK_API_KEY` in `.env`
-2. Call `POST /members/sync/rock` or `POST /assistant/integrations/rock/sync` to trigger a sync
+1. Add a Rock API key and HTTPS API base URL through secure connector setup, or set `ROCK_API_KEY` and `ROCK_BASE_URL` in `.env`
+2. Call `POST /assistant/integrations/rock/sync` to trigger a sync; `POST /members/sync/rock` remains as a legacy compatibility route and uses the same verify-before-sync boundary
 3. The app works fully standalone without Rock — the API key is optional
 
 The assistant integration sync path also writes a compact Rock sync summary to `/assistant/connected-items` and queues absence follow-up actions when synced attendance shows people who need pastoral attention.
@@ -115,7 +121,7 @@ OAuth connectors use server-side provider config and encrypted token storage. AP
 4. Open the returned authorization URL
 5. The provider redirects to `/assistant/integrations/{provider}/callback`, where Marge exchanges the code and stores the token payload encrypted
 
-For API-key connectors such as Breeze or Rock, owner/admin users can submit the key to `POST /assistant/integrations/{provider}/credentials`. Marge stores it encrypted as a workspace credential, never returns it in status/audit/chat responses, and still requires a safe credential check before sync.
+For API-key connectors such as Breeze or Rock, owner/admin users can submit the key and full public HTTPS base URL to `POST /assistant/integrations/{provider}/credentials`. Base URLs may include a normal path such as `/api/v2`, but not embedded usernames, passwords, query strings, fragments, localhost, or private-network hosts. Marge stores the key encrypted as a workspace credential, never returns it in status/audit/chat responses, and still requires a safe credential check before sync.
 
 Once Google Workspace is connected, Marge can sync recent Gmail and Calendar context into `/assistant/connected-items`, prepare pastor-review actions from that context, and create Gmail drafts or Google Calendar events for approved actions when their payload includes complete `email` or `calendar_event` data. Prepared desk suggestions remain local approval items until they contain concrete send/create details.
 
@@ -123,7 +129,7 @@ Planning Center OAuth can sync read-side People and Calendar context into `/assi
 
 Microsoft 365 OAuth can sync read-side Outlook mail and calendar context into `/assistant/connected-items`. Marge uses that context to queue inbox review and meeting-prep actions. Approved `email_draft` actions may create Outlook drafts, and approved `calendar_block` actions may create Outlook calendar events, only after Microsoft writeback policy and per-action approval. Marge still does not send Outlook mail.
 
-Rock RMS uses the same assistant connector surface for read-side sync when a workspace API key is saved or `ROCK_HALLMARK_API_KEY` is configured server-side. Rock sync imports people and attendance, stores only a compact sync summary as connected context, and prepares pastor-review follow-up from absence signals. It does not write back to Rock.
+Rock RMS uses the same assistant connector surface for read-side sync when a workspace API key and base URL are saved or `ROCK_API_KEY` plus `ROCK_BASE_URL` are configured server-side. Rock sync imports people and attendance, stores only a compact sync summary as connected context, and prepares pastor-review follow-up from absence signals. It does not write back to Rock.
 
 Breeze uses encrypted workspace credentials or `BREEZE_API_KEY` and `BREEZE_BASE_URL` server-side for read-side people and event sync. Marge stores compact Breeze context, queues review for new/visitor-like people, and prepares meeting-prep actions for pastoral events. It does not write back to Breeze.
 
@@ -143,7 +149,7 @@ With the FastAPI server running locally, run:
 .venv/bin/python scripts/smoke_first_run.py
 ```
 
-The script creates a temporary church workspace, teaches Marge ministry context through `/assistant/chat`, verifies that chat history persists, verifies that church voice, first ministry priority, weekly rhythm, and explicit guardrails are learned before setup work is queued, confirms `auto` mode stays live instead of showing demo people, checks that visitor-focused first-record setup and secure connector setup steps are queued, and removes the temporary local rows afterward.
+The script creates a temporary church workspace, teaches Marge ministry context through `/assistant/chat`, verifies that chat history persists, verifies that church voice, first ministry priority, personal support style, weekly rhythm, and explicit guardrails are learned before setup work is queued, confirms `auto` mode stays live instead of showing demo people, checks that visitor-focused first-record setup and secure connector setup steps are queued, and removes the temporary local rows afterward.
 
 For secure connector plumbing that does not require live Google credentials, run:
 
@@ -169,6 +175,14 @@ For external LLM/MCP clients that should drive the same first-run workflow, run:
 
 That script creates a temporary workspace, sends onboarding context through the MCP `tell_marge` tool, verifies that MCP output preserves saved/intent/profile metadata plus action cards, and confirms the MCP desk exposes concrete first-record and connector setup steps.
 
+For the combined pilot readiness gate planner, run:
+
+```bash
+.venv/bin/python scripts/smoke_pilot_readiness_gate.py
+```
+
+That smoke does not contact the network. It proves the combined gate refuses first-run writes and live connector checks until `MARGE_ACCOUNT_TOKEN` is present, and that non-local tokens must resolve to owner/admin/pastor access.
+
 For the static workspace shell, run:
 
 ```bash
@@ -191,7 +205,7 @@ Generic calendar prompts such as "Sync the calendar" or "Refresh the schedule" c
 
 ## Church Workspaces
 
-`POST /assistant/signup` creates a lightweight church workspace and returns a one-time owner user token. Clients should exchange that token for a shorter-lived `marge_sess_...` token with `POST /assistant/sessions`. The static frontend performs that exchange immediately, avoids persisting the raw token in `localStorage`, and relies on the HttpOnly `marge_session` cookie by default. API/MCP clients may send a session token as `X-Marge-Account-Token`. The pastor profile, members, visitors, care cases, prayer requests, briefing data, assistant chat history, assistant actions, connected items, audit rows, integration status, OAuth state, encrypted credentials, sessions, and writeback policies are scoped to that church. Requests without a token use only legacy unscoped local rows; invalid tokens return `401` instead of falling back to shared data.
+`POST /assistant/signup` requires a church name and valid owner email, creates a lightweight church workspace, and returns a one-time owner user token. Clients should exchange that token for a shorter-lived `marge_sess_...` token with `POST /assistant/sessions`. The static frontend performs that exchange immediately, avoids persisting the raw token in `localStorage`, and relies on the HttpOnly `marge_session` cookie by default. API/MCP clients may send a session token as `X-Marge-Account-Token`. The pastor profile, members, visitors, care cases, prayer requests, briefing data, assistant chat history, assistant actions, connected items, audit rows, integration status, OAuth state, encrypted credentials, sessions, and writeback policies are scoped to that church. Requests without a token use only legacy unscoped local rows; invalid tokens return `401` instead of falling back to shared data.
 
 Workspace owners/admins can create additional role-scoped user tokens with `POST /assistant/users/invite` and deactivate them with `PATCH /assistant/users/{id}`. User roles are `owner`, `admin`, `pastor`, `staff`, and `viewer`. Owner/admin tokens are required for connector setup and writeback policy changes; pastor/admin/owner tokens are required for ministry profile edits, approval queue, execution, audit log, connected-context, sync, pastoral briefing, pastoral drafts, member detail/notes, care cases, prayer requests, and member/visitor write surfaces. Staff tokens can read the live desk plus basic member/visitor directories, but the staff desk hides approval-queue items and staff cannot mutate pastoral records. When SMTP is configured, Marge emails an invite link with the one-time token; otherwise the response still returns the token for trusted manual sharing. The frontend accepts `?invite_token=...`, exchanges it for an HttpOnly session cookie, and removes it from the address bar. Existing users can request a one-time passwordless link from the first-run screen or with `POST /assistant/login-links/request`; `POST /assistant/login-links/exchange` turns that short-lived single-use token into the same revocable session cookie. Legacy account tokens still resolve as owner for existing local workspaces, but new browser sessions should use user tokens or passwordless sessions. Marge blocks deactivating the final active workspace owner.
 
@@ -213,20 +227,26 @@ To check a live workspace from the command line, set `MARGE_API_URL` and `MARGE_
 .venv/bin/python scripts/verify_live_integrations.py
 ```
 
-By default the script verifies only connectors that already look connected/configured for that workspace. Use explicit provider keys plus `--include-not-ready` when diagnosing setup, for example `.venv/bin/python scripts/verify_live_integrations.py google_workspace planning_center --include-not-ready`. This is a credential health check only; it does not sync ministry data, and it now checks that connected context and assistant actions are unchanged by verification.
+By default the script verifies only connectors that already look connected/configured for that workspace. Use explicit provider keys plus `--include-not-ready` when diagnosing setup, for example `.venv/bin/python scripts/verify_live_integrations.py google_workspace planning_center --include-not-ready`. This is a credential health check only; it does not sync ministry data, checks every page of connected context, assistant actions, members, visitors, care cases, and prayer requests, including private prayer requests, to prove verification leaves them unchanged, and refuses to count a provider if verification exposes token/API-key-shaped identity metadata or lacks affirmative non-secret identity/config metadata. Empty, false-only, zero-only, or negative numeric metadata does not count. `--require-live-provider` requires `MARGE_ACCOUNT_TOKEN` even against localhost, and non-local API checks always require it, so provider verification cannot run against an unscoped deployment. If the target API is unreachable, the script exits non-zero with a concise operator error instead of a traceback. When no external provider qualifies, human output includes **Next actions** and JSON output includes `next_actions` telling the operator to connect/configure a real provider, run Check credentials, rerun the verifier, and avoid first sync until it passes.
 
 For production handoff, require at least one real church-tool connector to verify successfully:
 
 ```bash
-.venv/bin/python scripts/verify_live_integrations.py --include-mcp --require-live-provider
+MARGE_API_URL=https://marge.yourchurch.org \
+MARGE_ACCOUNT_TOKEN=REPLACE_WITH_OWNER_ADMIN_PASTOR_SESSION \
+.venv/bin/python scripts/verify_live_integrations.py \
+  --include-mcp \
+  --require-live-provider \
+  --evidence-file artifacts/live-connector-verification.json
 ```
 
 `--include-mcp` can confirm the local/LLM bridge, but MCP alone does not prove Google Workspace, Microsoft 365, Planning Center, Breeze, or Rock RMS are connected.
+For readiness decisions, use the typed evidence fields: `required_live_provider` must be `true`, `generated_at` must be a valid timezone-bearing timestamp from the fresh verifier run and no older than 24 hours at gate time, `workspace` must identify the expected account with an owner/admin/pastor role, `external_provider_checks` must include at least one verified supported church-tool provider, `local_bridge_checks` may include MCP but cannot satisfy readiness, both `live_provider_ready` and `no_sync_side_effect_check_passed` must be `true`, and `side_effect_check.collections` must include passing connected-context, assistant-action, member, visitor, care, and prayer checks. The legacy `verified` array is for backward-compatible readers only.
 
-For pilot handoff, use the combined gate so production config, migrations, and live no-sync connector verification are checked together:
+For pilot handoff, use the combined gate so production config, public bootstrap, migrations, the disposable first-run workspace journey, and live no-sync connector verification are checked together:
 
 ```bash
-MARGE_API_URL=https://marge.yourchurch.org MARGE_ACCOUNT_TOKEN=marge_sess_... .venv/bin/python scripts/verify_pilot_readiness.py --env-file .env.production.candidate
+MARGE_API_URL=https://marge.yourchurch.org MARGE_ACCOUNT_TOKEN=REPLACE_WITH_OWNER_ADMIN_PASTOR_SESSION .venv/bin/python scripts/verify_pilot_readiness.py --env-file .env.production.candidate
 ```
 
 The combined gate also checks the public deployment bootstrap path. To run that no-write check by itself:
@@ -234,6 +254,8 @@ The combined gate also checks the public deployment bootstrap path. To run that 
 ```bash
 MARGE_API_URL=https://marge.yourchurch.org MARGE_APP_URL=https://marge.yourchurch.org/app .venv/bin/python scripts/verify_deployment_bootstrap.py
 ```
+
+That check verifies `/`, `/health`, `/app`, and `/assistant/config`. The public root and config responses must stay limited to first-run bootstrap fields, so they cannot accidentally expose workspace, connector, credential, or pastor data before signup.
 
 For local development, add `--allow-relaxed-account-tokens` because local routes usually allow legacy unscoped rows.
 
@@ -245,13 +267,18 @@ MARGE_API_URL=https://marge.yourchurch.org .venv/bin/python scripts/verify_first
 
 That script creates a disposable workspace, completes onboarding through chat, verifies the proactive first-record setup, logs a visitor through chat, queues a welcome draft, and confirms visitor follow-up lookup recalls the saved visitor. Local runs clean up automatically; remote verification workspaces should be removed manually if you do not want to keep them.
 
+The combined pilot gate runs that same first-run workspace rehearsal by default. It requires `MARGE_ACCOUNT_TOKEN` before first-run writes or live connector checks; for non-local API URLs it preflights the token against `/assistant/account`, so missing, invalid, or underprivileged operator tokens fail without creating disposable remote data. Use `--skip-first-run-workspace` only for targeted troubleshooting when you need a no-write gate run. Its summary **Next actions** include copy-pasteable rerun commands for production config and live-provider failures.
+Before its live-connector step, the combined gate removes any previous evidence file at the selected path, runs `verify_live_integrations.py --include-mcp --require-live-provider --evidence-file ...`, and validates that the fresh JSON matches the current `MARGE_API_URL`, has workspace scope, proves no-sync side-effect safety for each required workspace collection, and includes a verified supported external provider. Stale evidence, MCP-only evidence, unsupported providers, staff/viewer tokens, missing side-effect collection details, and legacy `verified` entries cannot pass the gate.
+
+If a candidate env file leaves operator-only values blank, such as `MARGE_ACCOUNT_TOKEN=`, the combined gate preserves non-empty `MARGE_ACCOUNT_TOKEN` and `MARGE_API_URL` values already supplied by the shell. Explicit `--token` and `--api-url` flags still take precedence.
+
 Before exposing a deployment to real pastoral data, run:
 
 ```bash
 .venv/bin/python scripts/verify_production_config.py
 ```
 
-That readiness check fails when production-critical settings are unsafe: missing production runtime enforcement, missing account-token enforcement, invalid OAuth encryption key, insecure session cookies, wildcard/non-HTTPS CORS, SQLite production database, startup schema creation, non-HTTPS app URL, missing invite/login email delivery, or partial OAuth provider config. It warns, but does not fail, when no live connector server config is present yet.
+That readiness check fails when production-critical settings are unsafe: missing production runtime enforcement, missing account-token enforcement, invalid connector credential encryption key, insecure session cookies, wildcard/non-HTTPS CORS, CORS that omits the app origin, SQLite production database, startup schema creation, non-HTTPS app URL, missing invite/login email delivery, partial OAuth provider config, OAuth redirect URIs on the wrong origin or callback path, or unsafe Breeze/Rock server-side connector base URLs. It warns, but does not fail, when no live connector server config is present yet. When `--env-file` is used, checked production keys are read from that candidate file rather than being silently filled by the shell environment. Failure output includes **Next actions** plus JSON `next_actions` so operators know which deployment setting to fix next.
 
 For a deployment handoff, start from `.env.production.example`, then use:
 
@@ -314,7 +341,7 @@ Assistant chat can also save local pastoral context from natural language:
 
 Assistant chat history is persisted account-side through `GET /assistant/chat/history`, so the first-run conversation survives reloads and MCP/LLM clients can see what the pastor has already taught Marge without asking him to repeat it. `DELETE /assistant/chat/history` clears the transcript only; saved profile context, people, care, prayer, and approval records remain.
 
-When Marge saves first-run ministry context, she should reflect back the specific church, role, church voice/tradition, first ministry priority, follow-up burden, tools, voice, and guardrails she understood, then name how she will use that memory for secure setup, drafting, prioritization, and approvals. This is intentional product behavior: first-run chat should not feel like a generic form save.
+When Marge saves first-run ministry context, she should reflect back the specific church, role, church voice/tradition, first ministry priority, follow-up burden, personal support style, tools, voice, and guardrails she understood, then name how she will use that memory for secure setup, drafting, prioritization, proactive nudges, and approvals. This is intentional product behavior: first-run chat should not feel like a generic form save.
 
 First-run setup prompts in chat should be concrete. For example, a visitor-related `data_seed` step should prompt and answer around logging the first real visitor, not "help me with setup."
 
@@ -351,26 +378,27 @@ See:
 
 ## Environment Variables
 
-See `.env.example` for all available configuration options.
+See `.env.example` for all available configuration options. The template also documents the local connector boundary: env placeholders alone do not prove live tools are connected, MCP/local API access is not a live provider, and Check credentials must run before the first sync.
 
 Key variables:
-- `PASTOR_NAME` — Pastor's first name (appears in all drafts)
-- `CHURCH_NAME` — Church name (appears in visitor messages)
+- `PASTOR_NAME` — Legacy fallback pastor name when no workspace profile is selected
+- `CHURCH_NAME` — Legacy fallback church name when no workspace profile is selected
+- `MARGE_ACCOUNT_TOKEN` / `MARGE_ACCOUNT_ID` / `MARGE_ACCOUNT_SLUG` — Optional workspace selector for CLI briefing scripts
 - `DATABASE_URL` — SQLite for dev, Postgres for production
 - `MARGE_ENV` — Set `production` in deployments so startup safety checks fail closed
 - `MARGE_AUTO_CREATE_SCHEMA` — Keep true for local dev; set false in production after running Alembic migrations
-- `MARGE_ENCRYPTION_KEY` — Fernet key required before OAuth tokens can be stored
+- `MARGE_ENCRYPTION_KEY` — Fernet key required before OAuth tokens or workspace API-key connector credentials can be stored
 - `MARGE_REQUIRE_ACCOUNT_TOKEN` — Set true before non-local exposure so scoped routes reject missing workspace tokens
 - `MARGE_SESSION_COOKIE_NAME` / `MARGE_SESSION_COOKIE_SECURE` / `MARGE_SESSION_COOKIE_SAMESITE` — HttpOnly browser session cookie settings for `POST /assistant/sessions`
 - `MARGE_APP_URL` — Exact public HTTPS `/app` URL used in invite/passwordless links
 - `MARGE_INVITE_EMAIL_FROM` / `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_STARTTLS` — Optional workspace invite email delivery
-- `CORS_ORIGINS` — Exact HTTPS frontend origin(s) with no path or wildcard
-- `ROCK_HALLMARK_API_KEY` — Optional server-wide Rock RMS API key; workspace API-key setup is preferred for multi-church use
-- `PLANNING_CENTER_CLIENT_ID` / `PLANNING_CENTER_CLIENT_SECRET` / `PLANNING_CENTER_REDIRECT_URI` — Planning Center OAuth
-- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` — Google Workspace OAuth
-- `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_REDIRECT_URI` — Microsoft 365 OAuth
-- `BREEZE_API_KEY` / `BREEZE_BASE_URL` — Optional server-wide Breeze API key and account URL; workspace API-key setup is preferred for multi-church use
-- `MARGE_API_URL` / `MARGE_ACCOUNT_TOKEN` — Optional for MCP clients and live connector verification scripts
+- `CORS_ORIGINS` — Exact HTTPS frontend origin(s) with no path or wildcard; include the origin from `MARGE_APP_URL`
+- `ROCK_API_KEY` / `ROCK_BASE_URL` — Optional server-wide Rock RMS API key and public HTTPS API v2 base URL with no username/password/query/fragment or localhost/private host; workspace API-key setup is preferred for multi-church use
+- `PLANNING_CENTER_CLIENT_ID` / `PLANNING_CENTER_CLIENT_SECRET` / `PLANNING_CENTER_REDIRECT_URI` — Planning Center OAuth; redirect URI must use the `MARGE_APP_URL` origin and `/assistant/integrations/planning_center/callback`
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` — Google Workspace OAuth; redirect URI must use the `MARGE_APP_URL` origin and `/assistant/integrations/google_workspace/callback`
+- `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_REDIRECT_URI` — Microsoft 365 OAuth; redirect URI must use the `MARGE_APP_URL` origin and `/assistant/integrations/microsoft_365/callback`
+- `BREEZE_API_KEY` / `BREEZE_BASE_URL` — Optional server-wide Breeze API key and public HTTPS account URL with no username/password/query/fragment or localhost/private host; workspace API-key setup is preferred for multi-church use
+- `MARGE_API_URL` / `MARGE_ACCOUNT_TOKEN` — API origin and workspace token for MCP clients and connector verification; `MARGE_ACCOUNT_TOKEN` is required for `--require-live-provider` and non-local live verification
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — Optional Telegram delivery
 
 ## Project Structure
@@ -396,7 +424,8 @@ marge/
 │       └── rock.py          # Rock RMS sync layer
 ├── scripts/
 │   ├── morning_briefing.py  # Standalone cron script
-│   └── smoke_mcp_first_run.py # MCP first-run workflow smoke
+│   ├── smoke_mcp_first_run.py # MCP first-run workflow smoke
+│   └── smoke_pilot_readiness_gate.py # No-network pilot gate planner smoke
 ├── frontend/
 │   └── index.html           # Product workspace mounted at /app
 ├── docs/
@@ -424,8 +453,6 @@ Marge is the beloved church secretary who's been at the church 30 years. She's w
 **She always says:**
 - "Tom's birthday is Thursday — he'd love a call"
 - "Janet could really use a call this week"
-- "Good morning, Pastor Nathan. Here are your people for today."
+- "Good morning, Pastor. Here is the ministry context I can see today."
 
 ---
-
-*Built for Nathan Parikh — Hallmark Church, Fort Worth TX. April 2026.*

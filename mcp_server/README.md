@@ -2,7 +2,7 @@
 
 Connect Marge to Claude Desktop, ChatGPT, or any MCP-compatible AI client.
 
-Ask your AI: *"Who needs care today?"* and get Marge's full morning briefing — pulled from your actual congregation data.
+Ask your AI: *"Who needs care today?"* and get Marge's briefing for the workspace token you provide. MCP is an LLM/client bridge into Marge; it is not itself a live church-tool connector.
 
 ## What it does
 
@@ -21,11 +21,15 @@ The Marge MCP server exposes your congregation data as tools any AI can use:
 | `add_member_note` | Log a pastoral note after a visit or conversation |
 | `draft_message` | Generate an outreach text or email in your voice |
 | `get_assistant_desk` | Get Marge's connected secretary desk, setup steps, priorities, drafts, approvals, and connector status |
+| `list_assistant_chat_history` | Read persisted assistant chat turns so first-run context survives across MCP clients |
+| `clear_assistant_chat_history` | Clear the persisted assistant transcript without deleting saved profile or ministry records |
 | `get_ministry_profile` | Read the pastor/church context Marge uses for onboarding and personalization |
-| `update_ministry_profile` | Save first-run ministry context such as role, follow-up burden, tools, voice, rhythm, and guardrails |
+| `update_ministry_profile` | Save first-run ministry context such as role, follow-up burden, support style, tools, voice, rhythm, and guardrails |
 | `list_integrations` | Show secure connector status for Rock, Planning Center, Breeze, Google Workspace, Microsoft 365, and MCP |
 | `start_integration_setup` | Start secure connector setup without asking the pastor to paste secrets into chat |
 | `sync_integration` | Pull connected provider context into Marge's normalized cache and approval queue after credentials have been checked |
+| `verify_integration` | Check connector credentials without syncing ministry data or queueing work |
+| `disconnect_integration` | Remove the current user's OAuth credential or a stored workspace API-key credential |
 | `list_connected_context` | List synced inbox, calendar, people, or connector context |
 | `list_approval_queue` | Inspect Marge's persisted assistant action queue |
 | `prepare_approval_queue` | Ask Marge to stage today's proactive work for pastor review |
@@ -118,5 +122,8 @@ Use `disconnect_integration` when a pastor asks Marge to stop using an OAuth-con
 For command-line live verification outside MCP, use the main repo script:
 
 ```bash
-MARGE_API_URL=http://localhost:8000 MARGE_ACCOUNT_TOKEN=marge_sess_... .venv/bin/python scripts/verify_live_integrations.py
+MARGE_API_URL=http://localhost:8000 MARGE_ACCOUNT_TOKEN=REPLACE_WITH_OWNER_ADMIN_PASTOR_SESSION .venv/bin/python scripts/verify_live_integrations.py
 ```
+
+For pilot readiness, use `--include-mcp --require-live-provider`. MCP can verify the local/LLM bridge, but MCP alone does not count as a live external provider; at least one real church tool such as Google Workspace, Microsoft 365, Planning Center, Breeze, or Rock RMS must pass Check credentials without syncing first.
+For handoff evidence, add `--evidence-file artifacts/live-connector-verification.json` and read the typed JSON fields instead of the legacy `verified` array. `generated_at` should be timezone-bearing and timestamp the fresh verifier run, `external_provider_checks` must include a verified supported provider, and `local_bridge_checks` may include MCP but cannot satisfy pilot readiness.

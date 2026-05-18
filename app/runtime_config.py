@@ -9,6 +9,7 @@ the readiness verifier expects.
 from __future__ import annotations
 
 import os
+import ipaddress
 from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
@@ -54,7 +55,38 @@ def placeholder_names(names: list[str]) -> list[str]:
 
 def valid_https_url(raw: str) -> bool:
     parsed = urlparse(raw)
-    return parsed.scheme == "https" and bool(parsed.netloc)
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and not parsed.username
+        and not parsed.password
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def valid_connector_base_url(raw: str) -> bool:
+    parsed = urlparse(raw)
+    return valid_https_url(raw) and public_connector_hostname(parsed.hostname)
+
+
+def public_connector_hostname(hostname: str | None) -> bool:
+    cleaned = (hostname or "").strip().strip("[]").lower()
+    if not cleaned or cleaned == "localhost" or cleaned.endswith(".localhost") or "." not in cleaned:
+        return False
+    try:
+        address = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return True
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
 
 
 def valid_fernet_key(raw: str) -> bool:
@@ -89,6 +121,25 @@ def valid_cors_origin(raw: str) -> bool:
         and not parsed.query
         and not parsed.fragment
     )
+
+
+def origin_for_url(raw: str) -> str:
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def valid_oauth_redirect_uri(raw: str, *, provider: str, app_url: str) -> tuple[bool, str]:
+    if not valid_https_url(raw):
+        return False, "must be HTTPS in production."
+    parsed = urlparse(raw)
+    expected_path = f"/assistant/integrations/{provider}/callback"
+    if parsed.path.rstrip("/") != expected_path:
+        return False, f"must use the {expected_path} callback path."
+    if valid_app_url(app_url) and origin_for_url(raw) != origin_for_url(app_url):
+        return False, "must use the same origin as MARGE_APP_URL."
+    return True, ""
 
 
 def production_safety_errors() -> list[str]:
@@ -133,6 +184,8 @@ def production_safety_errors() -> list[str]:
         errors.append("CORS_ORIGINS must not contain a wildcard in production.")
     elif any(placeholder_value(origin) or not valid_cors_origin(origin) for origin in cors_origins):
         errors.append("Every CORS_ORIGINS value must be an exact HTTPS origin with no path, query, wildcard, or placeholder.")
+    elif valid_app_url(app_url) and origin_for_url(app_url) not in cors_origins:
+        errors.append("CORS_ORIGINS must include the MARGE_APP_URL origin so the first-run app can call the API.")
 
     if not value("SMTP_HOST") or not value("MARGE_INVITE_EMAIL_FROM"):
         errors.append("SMTP_HOST and MARGE_INVITE_EMAIL_FROM must be set for invite/passwordless login delivery.")
@@ -142,11 +195,11 @@ def production_safety_errors() -> list[str]:
         errors.append("SMTP_STARTTLS must be true unless SMTP_PORT is 465.")
 
     oauth_groups = [
-        ("Planning Center", ["PLANNING_CENTER_CLIENT_ID", "PLANNING_CENTER_CLIENT_SECRET", "PLANNING_CENTER_REDIRECT_URI"]),
-        ("Google Workspace", ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI"]),
-        ("Microsoft 365", ["MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET", "MICROSOFT_REDIRECT_URI"]),
+        ("Planning Center", "planning_center", ["PLANNING_CENTER_CLIENT_ID", "PLANNING_CENTER_CLIENT_SECRET", "PLANNING_CENTER_REDIRECT_URI"]),
+        ("Google Workspace", "google_workspace", ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI"]),
+        ("Microsoft 365", "microsoft_365", ["MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET", "MICROSOFT_REDIRECT_URI"]),
     ]
-    for label, names in oauth_groups:
+    for label, provider, names in oauth_groups:
         present = [name for name in names if value(name)]
         placeholders = placeholder_names(names)
         if present and len(present) != len(names):
@@ -154,8 +207,10 @@ def production_safety_errors() -> list[str]:
             errors.append(f"{label} OAuth config is partial; missing {missing}.")
         elif placeholders:
             errors.append(f"{label} OAuth config still has placeholder values: {', '.join(placeholders)}.")
-        elif len(present) == len(names) and not valid_https_url(value(names[-1])):
-            errors.append(f"{names[-1]} must be HTTPS in production.")
+        elif len(present) == len(names):
+            redirect_ok, redirect_message = valid_oauth_redirect_uri(value(names[-1]), provider=provider, app_url=app_url)
+            if not redirect_ok:
+                errors.append(f"{names[-1]} {redirect_message}")
 
     breeze_names = ["BREEZE_API_KEY", "BREEZE_BASE_URL"]
     breeze_present = [name for name in breeze_names if value(name)]
@@ -164,9 +219,21 @@ def production_safety_errors() -> list[str]:
         errors.append(f"Breeze config is partial; missing {missing}.")
     elif placeholder_names(breeze_names):
         errors.append(f"Breeze config still has placeholder values: {', '.join(placeholder_names(breeze_names))}.")
+    elif len(breeze_present) == len(breeze_names) and not valid_connector_base_url(value("BREEZE_BASE_URL")):
+        errors.append("BREEZE_BASE_URL must be a public HTTPS base URL without username, password, query, or fragment in production.")
 
-    if placeholder_value(value("ROCK_HALLMARK_API_KEY")):
-        errors.append("Rock RMS server-side config still has a placeholder value.")
+    if value("ROCK_HALLMARK_API_KEY"):
+        errors.append("Use ROCK_API_KEY for production Rock config; ROCK_HALLMARK_API_KEY is a legacy local fallback.")
+
+    rock_names = ["ROCK_API_KEY", "ROCK_BASE_URL"]
+    rock_present = [name for name in rock_names if value(name)]
+    if rock_present and len(rock_present) != len(rock_names):
+        missing = ", ".join(name for name in rock_names if not value(name))
+        errors.append(f"Rock RMS server-side config is partial; missing {missing}.")
+    elif placeholder_names(rock_names):
+        errors.append(f"Rock RMS server-side config still has placeholder values: {', '.join(placeholder_names(rock_names))}.")
+    elif len(rock_present) == len(rock_names) and not valid_connector_base_url(value("ROCK_BASE_URL")):
+        errors.append("ROCK_BASE_URL must be a public HTTPS base URL without username, password, query, or fragment in production.")
 
     return errors
 

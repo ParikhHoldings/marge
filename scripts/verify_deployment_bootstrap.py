@@ -28,6 +28,7 @@ from typing import Any
 
 
 DEFAULT_API_URL = "http://127.0.0.1:8000"
+PUBLIC_CONFIG_KEYS = {"require_account_token", "signup_enabled", "secure_note"}
 
 
 @dataclass
@@ -73,6 +74,32 @@ def check_health(api_url: str) -> Check:
     return Check("fail", "HEALTH", f"{url} did not return a healthy JSON status.")
 
 
+def check_public_root(api_url: str) -> list[Check]:
+    url = f"{api_url}/"
+    try:
+        status, body, _headers = request("GET", url, accept="application/json")
+    except RuntimeError as exc:
+        return [Check("fail", "PUBLIC_ROOT", f"{url} is unreachable: {exc}.")]
+    parsed = parse_json(body)
+    if status >= 400:
+        return [Check("fail", "PUBLIC_ROOT", f"{url} returned HTTP {status}.")]
+    if not isinstance(parsed, dict):
+        return [Check("fail", "PUBLIC_ROOT", f"{url} did not return JSON.")]
+    checks = []
+    if parsed.get("status") == "ok" and parsed.get("app") == "/app":
+        checks.append(Check("pass", "PUBLIC_ROOT", "Public root points to the workspace app."))
+    else:
+        checks.append(Check("fail", "PUBLIC_ROOT", "Public root should return status=ok and app=/app."))
+    exposed_keys = sorted(set(parsed) & {"church", "church_name", "pastor", "pastor_name"})
+    root_text = json.dumps(parsed).lower()
+    if exposed_keys or "hallmark" in root_text or "pastor nathan" in root_text:
+        details = f" Unexpected keys: {', '.join(exposed_keys)}." if exposed_keys else ""
+        checks.append(Check("fail", "PUBLIC_ROOT_PRIVACY", f"Public root exposes legacy pastor/church identity.{details}"))
+    else:
+        checks.append(Check("pass", "PUBLIC_ROOT_PRIVACY", "Public root does not expose pastor or church identity before signup."))
+    return checks
+
+
 def check_assistant_config(api_url: str, *, allow_relaxed_account_tokens: bool) -> list[Check]:
     url = f"{api_url}/assistant/config"
     try:
@@ -85,6 +112,16 @@ def check_assistant_config(api_url: str, *, allow_relaxed_account_tokens: bool) 
         return [Check("fail", "ASSISTANT_CONFIG", f"{url} returned HTTP {status}.")]
     if not isinstance(parsed, dict):
         return [Check("fail", "ASSISTANT_CONFIG", f"{url} did not return JSON.")]
+    unexpected_keys = sorted(set(parsed) - PUBLIC_CONFIG_KEYS)
+    if unexpected_keys:
+        checks.append(Check("fail", "ASSISTANT_CONFIG_SHAPE", f"Public assistant config exposes unexpected field(s): {', '.join(unexpected_keys)}."))
+    else:
+        checks.append(Check("pass", "ASSISTANT_CONFIG_SHAPE", "Public assistant config exposes only first-run bootstrap fields."))
+    secure_note = parsed.get("secure_note")
+    if isinstance(secure_note, str) and "workspace" in secure_note.lower() and len(secure_note) <= 240:
+        checks.append(Check("pass", "ASSISTANT_CONFIG_NOTE", "Public assistant config keeps the safety note short and workspace-focused."))
+    else:
+        checks.append(Check("fail", "ASSISTANT_CONFIG_NOTE", "Public assistant config should include a short workspace-focused safety note."))
     if parsed.get("signup_enabled") is True:
         checks.append(Check("pass", "SIGNUP_CONFIG", "Workspace signup is enabled."))
     else:
@@ -133,6 +170,7 @@ def main() -> int:
     app_url = (args.app_url or default_app_url(api_url)).rstrip("/") or default_app_url(api_url)
 
     checks = [check_health(api_url)]
+    checks.extend(check_public_root(api_url))
     checks.extend(check_assistant_config(api_url, allow_relaxed_account_tokens=args.allow_relaxed_account_tokens))
     checks.append(check_app_shell(app_url))
 

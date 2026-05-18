@@ -17,11 +17,46 @@ import json
 import os
 import sys
 import argparse
+import ipaddress
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
+
+
+CHECKED_ENV_NAMES = {
+    "MARGE_ENV",
+    "MARGE_ENFORCE_PRODUCTION_CONFIG",
+    "DATABASE_URL",
+    "MARGE_AUTO_CREATE_SCHEMA",
+    "MARGE_REQUIRE_ACCOUNT_TOKEN",
+    "MARGE_ENCRYPTION_KEY",
+    "MARGE_SESSION_COOKIE_SECURE",
+    "MARGE_SESSION_COOKIE_SAMESITE",
+    "MARGE_APP_URL",
+    "CORS_ORIGINS",
+    "SMTP_HOST",
+    "MARGE_INVITE_EMAIL_FROM",
+    "SMTP_USERNAME",
+    "SMTP_PASSWORD",
+    "SMTP_STARTTLS",
+    "SMTP_PORT",
+    "PLANNING_CENTER_CLIENT_ID",
+    "PLANNING_CENTER_CLIENT_SECRET",
+    "PLANNING_CENTER_REDIRECT_URI",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REDIRECT_URI",
+    "MICROSOFT_CLIENT_ID",
+    "MICROSOFT_CLIENT_SECRET",
+    "MICROSOFT_REDIRECT_URI",
+    "BREEZE_API_KEY",
+    "BREEZE_BASE_URL",
+    "ROCK_API_KEY",
+    "ROCK_BASE_URL",
+    "ROCK_HALLMARK_API_KEY",
+}
 
 
 @dataclass
@@ -64,11 +99,51 @@ def placeholder_names(names: list[str]) -> list[str]:
 
 def valid_https_url(raw: str, *, allow_localhost: bool = False) -> bool:
     parsed = urlparse(raw)
-    if parsed.scheme == "https" and parsed.netloc:
+    if (
+        parsed.scheme == "https"
+        and parsed.hostname
+        and not parsed.username
+        and not parsed.password
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    ):
         return True
-    if allow_localhost and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}:
+    if (
+        allow_localhost
+        and parsed.scheme == "http"
+        and parsed.hostname in {"localhost", "127.0.0.1"}
+        and not parsed.username
+        and not parsed.password
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    ):
         return True
     return False
+
+
+def valid_connector_base_url(raw: str) -> bool:
+    parsed = urlparse(raw)
+    return valid_https_url(raw) and public_connector_hostname(parsed.hostname)
+
+
+def public_connector_hostname(hostname: str | None) -> bool:
+    cleaned = (hostname or "").strip().strip("[]").lower()
+    if not cleaned or cleaned == "localhost" or cleaned.endswith(".localhost") or "." not in cleaned:
+        return False
+    try:
+        address = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return True
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
 
 
 def valid_app_url(raw: str) -> bool:
@@ -93,6 +168,25 @@ def valid_cors_origin(raw: str) -> bool:
         and not parsed.query
         and not parsed.fragment
     )
+
+
+def origin_for_url(raw: str) -> str:
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def valid_oauth_redirect_uri(raw: str, *, provider: str, app_url: str) -> tuple[bool, str]:
+    if not valid_https_url(raw):
+        return False, "must be HTTPS."
+    parsed = urlparse(raw)
+    expected_path = f"/assistant/integrations/{provider}/callback"
+    if parsed.path.rstrip("/") != expected_path:
+        return False, f"must use the {expected_path} callback path."
+    if valid_app_url(app_url) and origin_for_url(raw) != origin_for_url(app_url):
+        return False, "must use the same origin as MARGE_APP_URL."
+    return True, ""
 
 
 def valid_fernet_key(raw: str) -> bool:
@@ -136,7 +230,7 @@ def production_checks() -> list[Check]:
         checks.append(Check("fail", "MARGE_REQUIRE_ACCOUNT_TOKEN", "Set MARGE_REQUIRE_ACCOUNT_TOKEN=true before exposing real pastoral data."))
 
     if valid_fernet_key(value("MARGE_ENCRYPTION_KEY")):
-        checks.append(Check("pass", "MARGE_ENCRYPTION_KEY", "OAuth token encryption key is valid."))
+        checks.append(Check("pass", "MARGE_ENCRYPTION_KEY", "Connector credential encryption key is valid."))
     else:
         checks.append(Check("fail", "MARGE_ENCRYPTION_KEY", "MARGE_ENCRYPTION_KEY must be a valid Fernet key."))
 
@@ -170,6 +264,8 @@ def production_checks() -> list[Check]:
         checks.append(Check("fail", "CORS_ORIGINS", "Replace placeholder CORS origins with the real HTTPS frontend origin(s)."))
     elif any(not valid_cors_origin(origin) for origin in cors_origins):
         checks.append(Check("fail", "CORS_ORIGINS", "Every production CORS origin should be an exact HTTPS origin with no path, query, or wildcard."))
+    elif valid_app_url(app_url) and origin_for_url(app_url) not in cors_origins:
+        checks.append(Check("fail", "CORS_ORIGINS", "CORS_ORIGINS must include the MARGE_APP_URL origin so the first-run app can call the API."))
     else:
         checks.append(Check("pass", "CORS_ORIGINS", f"{len(cors_origins)} HTTPS CORS origin(s) configured."))
 
@@ -186,11 +282,11 @@ def production_checks() -> list[Check]:
 
     configured_oauth = []
     oauth_groups = [
-        ("Planning Center", ["PLANNING_CENTER_CLIENT_ID", "PLANNING_CENTER_CLIENT_SECRET", "PLANNING_CENTER_REDIRECT_URI"]),
-        ("Google Workspace", ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI"]),
-        ("Microsoft 365", ["MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET", "MICROSOFT_REDIRECT_URI"]),
+        ("Planning Center", "planning_center", ["PLANNING_CENTER_CLIENT_ID", "PLANNING_CENTER_CLIENT_SECRET", "PLANNING_CENTER_REDIRECT_URI"]),
+        ("Google Workspace", "google_workspace", ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI"]),
+        ("Microsoft 365", "microsoft_365", ["MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET", "MICROSOFT_REDIRECT_URI"]),
     ]
-    for label, names in oauth_groups:
+    for label, provider, names in oauth_groups:
         present = [name for name in names if value(name)]
         if present and len(present) != len(names):
             missing = ", ".join(name for name in names if not value(name))
@@ -199,22 +295,40 @@ def production_checks() -> list[Check]:
             checks.append(Check("fail", label, f"OAuth config still has placeholder values: {', '.join(placeholder_names(names))}."))
         elif len(present) == len(names):
             redirect_name = names[-1]
-            if valid_https_url(value(redirect_name)):
+            redirect_ok, redirect_message = valid_oauth_redirect_uri(value(redirect_name), provider=provider, app_url=app_url)
+            if redirect_ok:
                 configured_oauth.append(label)
             else:
-                checks.append(Check("fail", redirect_name, f"{redirect_name} must be HTTPS."))
+                checks.append(Check("fail", redirect_name, f"{redirect_name} {redirect_message}"))
 
     breeze_names = ["BREEZE_API_KEY", "BREEZE_BASE_URL"]
     breeze_present = [name for name in breeze_names if value(name)]
-    breeze_configured = len(breeze_present) == len(breeze_names) and not placeholder_names(breeze_names)
-    rock_configured = value("ROCK_HALLMARK_API_KEY") and not placeholder_value(value("ROCK_HALLMARK_API_KEY"))
+    breeze_configured = False
+    rock_names = ["ROCK_API_KEY", "ROCK_BASE_URL"]
+    rock_present = [name for name in rock_names if value(name)]
+    rock_configured = False
     if breeze_present and len(breeze_present) != len(breeze_names):
         missing = ", ".join(name for name in breeze_names if not value(name))
         checks.append(Check("fail", "Breeze", f"Breeze server-side config is partial; missing {missing}."))
     elif placeholder_names(breeze_names):
         checks.append(Check("fail", "Breeze", f"Breeze server-side config still has placeholder values: {', '.join(placeholder_names(breeze_names))}."))
-    if value("ROCK_HALLMARK_API_KEY") and not rock_configured:
-        checks.append(Check("fail", "Rock RMS", "Rock RMS server-side config still has a placeholder value."))
+    elif len(breeze_present) == len(breeze_names):
+        if valid_connector_base_url(value("BREEZE_BASE_URL")):
+            breeze_configured = True
+        else:
+            checks.append(Check("fail", "BREEZE_BASE_URL", "BREEZE_BASE_URL must be a public HTTPS base URL without username, password, query, or fragment."))
+    if value("ROCK_HALLMARK_API_KEY"):
+        checks.append(Check("fail", "Rock RMS", "Use ROCK_API_KEY for production Rock config; ROCK_HALLMARK_API_KEY is a legacy local fallback."))
+    if rock_present and len(rock_present) != len(rock_names):
+        missing = ", ".join(name for name in rock_names if not value(name))
+        checks.append(Check("fail", "Rock RMS", f"Rock RMS server-side config is partial; missing {missing}."))
+    elif placeholder_names(rock_names):
+        checks.append(Check("fail", "Rock RMS", f"Rock RMS server-side config still has placeholder values: {', '.join(placeholder_names(rock_names))}."))
+    elif len(rock_present) == len(rock_names):
+        if valid_connector_base_url(value("ROCK_BASE_URL")):
+            rock_configured = True
+        else:
+            checks.append(Check("fail", "ROCK_BASE_URL", "ROCK_BASE_URL must be a public HTTPS base URL without username, password, query, or fragment."))
 
     if configured_oauth or breeze_configured or rock_configured:
         providers = configured_oauth[:]
@@ -229,12 +343,79 @@ def production_checks() -> list[Check]:
     return checks
 
 
+def production_next_actions(checks: list[Check], *, env_file: str | None = None) -> list[str]:
+    failing_names = {check.name for check in checks if check.level == "fail"}
+    warning_names = {check.name for check in checks if check.level == "warn"}
+    actions: list[str] = []
+    env_target = env_file or ".env.production.candidate"
+
+    if "MARGE_ENV" in failing_names:
+        actions.append("Set MARGE_ENV=production or MARGE_ENFORCE_PRODUCTION_CONFIG=true so unsafe deployments fail closed.")
+    if "DATABASE_URL" in failing_names:
+        actions.append("Provision a managed production database and set DATABASE_URL; do not use SQLite for real pastoral data.")
+    if "MARGE_AUTO_CREATE_SCHEMA" in failing_names:
+        actions.append("Run Alembic migrations during deployment, then set MARGE_AUTO_CREATE_SCHEMA=false.")
+    if "MARGE_REQUIRE_ACCOUNT_TOKEN" in failing_names:
+        actions.append("Set MARGE_REQUIRE_ACCOUNT_TOKEN=true so scoped routes require a pastor/admin/owner workspace token.")
+    if "MARGE_ENCRYPTION_KEY" in failing_names:
+        actions.append("Generate a stable Fernet key with `python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"` and set MARGE_ENCRYPTION_KEY.")
+    if "MARGE_SESSION_COOKIE_SECURE" in failing_names or "MARGE_SESSION_COOKIE_SAMESITE" in failing_names:
+        actions.append("Set secure browser-session cookie settings for HTTPS, usually MARGE_SESSION_COOKIE_SECURE=true and MARGE_SESSION_COOKIE_SAMESITE=lax.")
+    if "MARGE_APP_URL" in failing_names or "CORS_ORIGINS" in failing_names:
+        actions.append("Set MARGE_APP_URL to the exact public https://.../app URL and CORS_ORIGINS to the matching origin with no path or wildcard.")
+    if "SMTP" in failing_names or "SMTP_STARTTLS" in failing_names:
+        actions.append("Configure SMTP_HOST, MARGE_INVITE_EMAIL_FROM, and SMTP TLS/auth settings so invite and passwordless login links can be delivered.")
+
+    oauth_failures = [
+        name
+        for name in failing_names
+        if name in {
+            "Planning Center",
+            "Google Workspace",
+            "Microsoft 365",
+            "PLANNING_CENTER_REDIRECT_URI",
+            "GOOGLE_REDIRECT_URI",
+            "MICROSOFT_REDIRECT_URI",
+        }
+    ]
+    if oauth_failures:
+        actions.append("Complete each configured OAuth provider as a full client id, client secret, and same-origin HTTPS callback path.")
+
+    connector_failures = [
+        name
+        for name in failing_names
+        if name in {"Breeze", "Rock RMS", "BREEZE_BASE_URL", "ROCK_BASE_URL"}
+    ]
+    if connector_failures:
+        actions.append("Fix Breeze/Rock server-side API-key config or leave it blank and use encrypted workspace credentials; base URLs must be clean public HTTPS URLs.")
+
+    if "CONNECTORS" in warning_names:
+        actions.append("Before pilot use, connect or configure at least one real external provider and run the no-sync Check credentials flow.")
+
+    if failing_names:
+        actions.append(f"Rerun `.venv/bin/python scripts/verify_production_config.py --env-file {env_target}` until failures are 0.")
+    elif warning_names:
+        actions.append("Production guardrails pass, but resolve warnings before a first pastor pilot if they affect live tool connection.")
+
+    return actions
+
+
+def print_next_actions(actions: list[str]) -> None:
+    if not actions:
+        return
+    print("\nNext actions:")
+    for action in actions:
+        print(f"  - {action}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check whether Marge's environment is safe enough for non-local deployment.")
     parser.add_argument("--env-file", help="Optional env file to load before checking, for example .env.production.candidate.")
     args = parser.parse_args()
 
     if args.env_file:
+        for name in CHECKED_ENV_NAMES:
+            os.environ.pop(name, None)
         load_dotenv(args.env_file, override=True)
     else:
         load_dotenv()
@@ -246,7 +427,9 @@ def main() -> int:
 
     failures = [check for check in checks if check.level == "fail"]
     warnings = [check for check in checks if check.level == "warn"]
-    print(json.dumps({"failures": len(failures), "warnings": len(warnings)}, indent=2))
+    next_actions = production_next_actions(checks, env_file=args.env_file)
+    print(json.dumps({"failures": len(failures), "warnings": len(warnings), "next_actions": next_actions}, indent=2))
+    print_next_actions(next_actions)
     return 1 if failures else 0
 
 

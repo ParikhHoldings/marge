@@ -28,6 +28,7 @@ Claude Desktop config (~/.claude/claude_desktop_config.json):
 
 import os
 import json
+import re
 import httpx
 from datetime import date
 
@@ -89,11 +90,26 @@ def _headers() -> dict:
 
 
 def _find_member(name: str) -> dict | None:
-    """Find first member matching name search."""
+    """Find a safe member match by exact name or single search result."""
     results = _get("/members/", params={"q": name})
-    if isinstance(results, list) and results:
+    if not isinstance(results, list) or not results:
+        return None
+    requested = _normalize_person_name(name)
+    exact = [
+        member
+        for member in results
+        if _normalize_person_name(member.get("full_name")) == requested
+        or _normalize_person_name(" ".join(filter(None, [member.get("first_name"), member.get("last_name")]))) == requested
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    if len(results) == 1:
         return results[0]
     return None
+
+
+def _normalize_person_name(value) -> str:
+    return " ".join(str(value or "").lower().split())
 
 
 def _normalize_care_category(category: str) -> str:
@@ -106,61 +122,102 @@ def _normalize_care_category(category: str) -> str:
     return "general"
 
 
+def _care_case_name(case: dict) -> str:
+    return _redact_secret_text(case.get("member_name") or "Name not linked")
+
+
+def _prayer_request_name(prayer: dict) -> str:
+    return _redact_secret_text(prayer.get("member_name") or prayer.get("submitted_by") or "Name withheld")
+
+
+def _member_not_found_message(name: str, next_step: str) -> str:
+    safe_name = _redact_secret_text(name)
+    return (
+        f"No saved person matched '{safe_name}'. {next_step} "
+        "If this is a real person, first add them through tell_marge with enough pastoral context, "
+        f"for example: Help me add {safe_name} as a person."
+    )
+
+
+def _member_display_name(member: dict) -> str:
+    return _redact_secret_text(_text_or(
+        member.get("full_name")
+        or " ".join(str(part).strip() for part in [member.get("first_name"), member.get("last_name")] if part).strip(),
+        "Member name not linked",
+    ))
+
+
+def _text_or(value, fallback: str) -> str:
+    if value is None:
+        return fallback
+    rendered = str(value).strip()
+    return rendered or fallback
+
+
 def _format_desk_item(item: dict) -> str:
-    title = item.get("title") or "Untitled"
-    detail = item.get("detail") or item.get("subtitle") or ""
-    action = item.get("action") or "Review"
-    priority = item.get("priority") or "medium"
+    title = _redact_secret_text(_text_or(item.get("title"), "Review item title not included"))
+    detail = _redact_secret_text(item.get("detail") or item.get("subtitle") or "")
+    action = _redact_secret_text(item.get("action") or "Review")
+    priority = _redact_secret_text(item.get("priority") or "medium")
     return f"  • {title} [{priority}] — {action}" + (f": {detail}" if detail else "")
 
 
 def _format_action(action: dict) -> str:
-    status = action.get("status", "pending")
-    action_type = action.get("action_type", "assistant_action")
-    privacy = action.get("privacy_level", "pastoral")
-    title = action.get("title") or "Untitled"
-    description = action.get("description") or ""
+    status = _redact_secret_text(action.get("status", "pending"))
+    action_type = _redact_secret_text(action.get("action_type", "assistant_action"))
+    privacy = _redact_secret_text(action.get("privacy_level", "pastoral"))
+    title = _redact_secret_text(_text_or(action.get("title"), "Assistant action title not included"))
+    description = _redact_secret_text(action.get("description") or "")
     line = f"  • #{action.get('id')} {title} [{status}, {action_type}, {privacy}]"
     return f"{line} — {description}" if description else line
 
 
 def _format_integration(item: dict) -> str:
-    display = item.get("display_name") or item.get("provider")
-    status = (item.get("status") or "planned").replace("_", " ")
+    display = _redact_secret_text(item.get("display_name") or item.get("provider"))
+    provider = _redact_secret_text(item.get("provider") or "")
+    status = _redact_secret_text((item.get("status") or "planned").replace("_", " "))
+    if provider == "mcp":
+        hint = _redact_secret_text(item.get("config_hint") or item.get("secure_note") or "")
+        boundary = (
+            "local agent bridge, not a church-tool provider. "
+            "It lets LLM clients call Marge; it does not prove Google Workspace, "
+            "Planning Center, Microsoft 365, Breeze, or Rock RMS are connected"
+        )
+        return f"  • {display}: {status}, {boundary}" + (f" — {hint}" if hint else "")
     write = "write enabled" if item.get("write_enabled") else "read/review only"
-    verified = item.get("verified_at")
+    verified = _redact_secret_text(item.get("verified_at"))
     ready_statuses = {"connected", "configured", "available"}
     credential_state = ""
     if verified:
         credential_state = f", checked {verified}"
-    elif item.get("provider") != "mcp" and item.get("status") in ready_statuses:
+    elif item.get("status") in ready_statuses:
         credential_state = ", needs credential check before sync"
-    hint = item.get("config_hint") or item.get("secure_note") or ""
+    hint = _redact_secret_text(item.get("config_hint") or item.get("secure_note") or "")
     return f"  • {display}: {status}, {write}{credential_state}" + (f" — {hint}" if hint else "")
 
 
 def _format_chat_message(message: dict) -> str:
     role = "Pastor" if message.get("role") == "user" else "Marge"
-    content = (message.get("content") or "").strip()
-    intent = message.get("intent") or "chat"
+    content = _redact_secret_text((message.get("content") or "").strip())
+    intent = _redact_secret_text(message.get("intent") or "chat")
     return f"  • {role} [{intent}]: {content}"
 
 
 def _format_tell_marge_response(result: dict) -> str:
-    lines = [result.get("reply") or "Got it."]
+    lines = [_redact_secret_text(result.get("reply") or "Got it.")]
     metadata = []
     if result.get("intent"):
-        metadata.append(f"intent={result['intent']}")
+        metadata.append(f"intent={_redact_secret_text(result['intent'])}")
     if "saved" in result:
         metadata.append(f"saved={bool(result.get('saved'))}")
     if result.get("mode"):
-        metadata.append(f"mode={result['mode']}")
+        metadata.append(f"mode={_redact_secret_text(result['mode'])}")
     if metadata:
         lines.extend(["", "Response metadata: " + ", ".join(metadata)])
 
     profile = result.get("profile") or {}
     if profile:
-        missing = profile.get("missing_fields") or []
+        missing = [_redact_secret_text(field) for field in profile.get("missing_fields") or []]
         lines.append(
             f"Profile: {profile.get('completion_percent', 0)}% complete"
             + (f"; missing {', '.join(missing)}" if missing else "; complete")
@@ -174,12 +231,12 @@ def _format_tell_marge_response(result: dict) -> str:
     prompts = result.get("suggested_prompts") or []
     if prompts:
         lines.extend(["", "Suggested prompts:"])
-        lines.extend(f"  • {prompt}" for prompt in prompts[:6])
+        lines.extend(f"  • {_redact_secret_text(prompt)}" for prompt in prompts[:6])
     return "\n".join(lines)
 
 
 def _compact_payload(payload: dict, limit: int = 800) -> str:
-    rendered = json.dumps(payload, indent=2, default=str)
+    rendered = _redact_secret_text(json.dumps(payload, indent=2, default=str))
     if len(rendered) <= limit:
         return rendered
     return rendered[: limit - 3].rstrip() + "..."
@@ -194,21 +251,47 @@ def _provider_display_name(provider: str) -> str:
         "rock": "Rock RMS",
         "mcp": "MCP",
     }
-    return names.get(provider, provider.replace("_", " ").title())
+    return _redact_secret_text(names.get(provider, provider.replace("_", " ").title()))
 
 
 def _http_error_detail(exc: httpx.HTTPStatusError) -> str:
     try:
         payload = exc.response.json()
     except ValueError:
-        return exc.response.text or str(exc)
+        return _redact_secret_text(exc.response.text or str(exc))
     if isinstance(payload, dict):
         detail = payload.get("detail")
         if isinstance(detail, str):
-            return detail
+            return _redact_secret_text(detail)
         if detail is not None:
-            return json.dumps(detail, default=str)
-    return json.dumps(payload, default=str)
+            return _redact_secret_text(json.dumps(detail, default=str))
+    return _redact_secret_text(json.dumps(payload, default=str))
+
+
+SECRET_TEXT_REDACTIONS = [
+    (
+        re.compile(
+            r"\b(access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|client[_-]?secret|token[_-]?ciphertext)\s*[:=]\s*[^\s,;]+",
+            re.IGNORECASE,
+        ),
+        r"\1=<redacted>",
+    ),
+    (re.compile(r"\b(authorization\s*[:=]\s*bearer\s+)[^\s,;]+", re.IGNORECASE), r"\1<redacted>"),
+    (re.compile(r"\b(bearer\s+)[A-Za-z0-9._~+/\-]{16,}", re.IGNORECASE), r"\1<redacted>"),
+    (re.compile(r"\bmarge_sess_[A-Za-z0-9._~+\-/=]{8,}"), "<redacted-marge-session>"),
+    (re.compile(r"\bya29\.[A-Za-z0-9._~+\-/=]{8,}"), "<redacted-google-token>"),
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{8,}"),
+        "<redacted-jwt>",
+    ),
+]
+
+
+def _redact_secret_text(value) -> str:
+    text = str(value or "")
+    for pattern, replacement in SECRET_TEXT_REDACTIONS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def _sync_needs_credential_check(exc: httpx.HTTPStatusError) -> bool:
@@ -221,18 +304,36 @@ def _sync_needs_credential_check(exc: httpx.HTTPStatusError) -> bool:
 def _format_sync_precheck_verification(provider: str, result: dict) -> str:
     display = _provider_display_name(result.get("provider") or provider)
     identity = result.get("identity") or {}
-    identity_bits = []
-    for key in ["email", "display_name", "name", "id", "sample_people_access"]:
-        if key in identity and identity.get(key) is not None:
-            identity_bits.append(f"{key}: {identity[key]}")
+    identity_bits = _format_identity_bits(identity)
     lines = [
-        f"{display} credentials verified at {result.get('verified_at')} without syncing ministry data.",
+        f"{display} credentials verified at {_redact_secret_text(result.get('verified_at'))} without syncing ministry data.",
         "I did not import people, email, calendar, or attendance context, and I did not queue actions.",
         "Ask to sync this connector again when you want Marge to import fresh ministry context.",
     ]
     if identity_bits:
         lines.append("Non-secret identity check: " + ", ".join(identity_bits))
     return "\n".join(lines)
+
+
+def _format_identity_bits(identity: dict) -> list[str]:
+    bits = []
+    labels = {
+        "email": "email",
+        "display_name": "name",
+        "name": "name",
+        "id": "id",
+        "people_access_confirmed": "people access",
+    }
+    for key, label in labels.items():
+        if key not in identity or identity.get(key) is None:
+            continue
+        value = identity[key]
+        if isinstance(value, bool):
+            rendered = "confirmed" if value else "not confirmed"
+        else:
+            rendered = _redact_secret_text(value)
+        bits.append(f"{label}: {rendered}")
+    return bits
 
 
 # ── Tool Definitions ──────────────────────────────────────────────────────────
@@ -359,7 +460,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="add_prayer_request",
-            description="Add a prayer request for a member or anonymous person.",
+            description="Add a prayer request for a saved member or an unlinked named/private submitter.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -370,6 +471,10 @@ async def list_tools() -> list[types.Tool]:
                     "member_name": {
                         "type": "string",
                         "description": "Name of the member this is for (optional — search will be used to find them).",
+                    },
+                    "submitted_by": {
+                        "type": "string",
+                        "description": "Name to preserve when the request is not linked to a saved member.",
                     },
                     "is_private": {
                         "type": "boolean",
@@ -493,7 +598,7 @@ async def list_tools() -> list[types.Tool]:
             name="get_ministry_profile",
             description=(
                 "Get the current church workspace profile Marge uses for onboarding, drafting voice, "
-                "follow-up burden, secure connector setup, weekly rhythm, and guardrails."
+                "follow-up burden, personal support style, secure connector setup, weekly rhythm, and guardrails."
             ),
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
@@ -501,7 +606,7 @@ async def list_tools() -> list[types.Tool]:
             name="update_ministry_profile",
             description=(
                 "Save pastor/church context Marge should remember. Use this for first-run onboarding "
-                "answers such as role, church context, tools in use, follow-up pain, drafting voice, weekly rhythm, and guardrails."
+                "answers such as role, church context, follow-up pain, support style, tools in use, drafting voice, weekly rhythm, and guardrails."
             ),
             inputSchema={
                 "type": "object",
@@ -513,6 +618,7 @@ async def list_tools() -> list[types.Tool]:
                     "church_context": {"type": "string"},
                     "ministry_priorities": {"type": "string"},
                     "followup_pain": {"type": "string"},
+                    "support_preferences": {"type": "string"},
                     "weekly_rhythm": {"type": "string"},
                     "communication_style": {"type": "string"},
                     "tools_in_use": {"type": "string"},
@@ -690,9 +796,7 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Chat with Marge in plain English. She can answer from the current desk, save ministry context, "
                 "log pastoral updates, prepare drafts, start secure connector setup, and suggest follow-up actions. "
-                "Examples: 'I visited Martha today, she is doing better', "
-                "'Tom Henderson mentioned he lost his job', "
-                "'The Wilson family has been absent for a month — can you flag them?'"
+                "Use the real person, family, or ministry situation the pastor gives you instead of inventing examples."
             ),
             inputSchema={
                 "type": "object",
@@ -725,17 +829,25 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     try:
         if name == "get_morning_briefing":
             data = _get("/briefing/today")
-            return text(data.get("plain_text", json.dumps(data, indent=2)))
+            return text(_redact_secret_text(data.get("plain_text", json.dumps(data, indent=2))))
 
         elif name == "list_members":
             search = arguments.get("search", "")
             members = _get("/members/", params={"q": search} if search else {})
             if not members:
-                return text("No members found matching that search.")
+                if search:
+                    return text(
+                        f"No saved person matched '{_redact_secret_text(search)}'. If this is a real person, add them with enough context "
+                        "before creating care, prayer, or follow-up work."
+                    )
+                return text(
+                    "No people are saved in this workspace yet. Add the first real person, visitor, care case, "
+                    "or synced directory context before treating the directory as checked."
+                )
             lines = [f"Found {len(members)} member(s):"]
             for m in members[:20]:
-                lines.append(f"  • {m['full_name']} (ID: {m['id']})" +
-                             (f" — last attended {m.get('last_attendance', 'unknown')}" if m.get('last_attendance') else ""))
+                attendance = f" — last attended {_redact_secret_text(m['last_attendance'])}" if m.get("last_attendance") else ""
+                lines.append(f"  • {_member_display_name(m)} (ID: {m.get('id', 'id not included')}){attendance}")
             return text("\n".join(lines))
 
         elif name == "log_visitor":
@@ -753,14 +865,17 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = _post("/visitors/", body)
             recipient_note = " with recipient details" if result.get("email") else ""
             return text(
-                f"Logged visitor: {result['full_name']} visited on {result['visit_date']}. "
+                f"Logged visitor: {_redact_secret_text(result['full_name'])} visited on {_redact_secret_text(result['visit_date'])}. "
                 f"Marge queued a welcome draft for pastor review{recipient_note}; nothing was sent."
             )
 
         elif name == "log_care_event":
             member = _find_member(arguments["member_name"])
             if not member:
-                return text(f"Could not find a member named '{arguments['member_name']}'. Try list_members to search.")
+                return text(_member_not_found_message(
+                    arguments["member_name"],
+                    "I did not open a care case because I cannot safely link it to a saved member.",
+                ))
             body = {
                 "member_id": member["id"],
                 "category": _normalize_care_category(arguments["category"]),
@@ -768,8 +883,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             }
             result = _post("/care/", body)
             return text(
-                f"Care case opened for {member['full_name']} (ID: {result['id']}). "
-                f"Category: {result['category']}. Marge will surface this in the morning briefing."
+                f"Care case opened for {_member_display_name(member)} (ID: {result['id']}). "
+                f"Category: {_redact_secret_text(result['category'])}. Marge will surface this in the morning briefing."
             )
 
         elif name == "list_care_cases":
@@ -778,30 +893,39 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 params["status"] = arguments["status"]
             cases = _get("/care/", params=params)
             if not cases:
-                return text("No care cases found.")
+                return text(
+                    "No care cases are saved in this workspace yet. Add the first real person needing care "
+                    "before Marge plans care follow-up."
+                )
             lines = [f"Found {len(cases)} care case(s):"]
             for case in cases[:20]:
-                last = case.get("last_contact") or "no contact logged"
+                last = _redact_secret_text(case.get("last_contact") or "no contact logged")
+                category = _redact_secret_text(case.get("category") or "general")
+                status = _redact_secret_text(case.get("status") or "active")
                 lines.append(
-                    f"  • {case.get('member_name', 'Unknown')} (care ID: {case['id']}) "
-                    f"[{case['category']}, {case['status']}] — last contact: {last}"
+                    f"  • {_care_case_name(case)} (care ID: {case['id']}) "
+                    f"[{category}, {status}] — last contact: {last}"
                 )
             return text("\n".join(lines))
 
         elif name == "mark_contacted":
             body = {"note": arguments.get("note", "Contacted via Marge")}
             result = _post(f"/care/{arguments['care_id']}/contact", body)
-            member_name = result.get("member_name", "the member")
+            member_name = _redact_secret_text(result.get("member_name", "the member"))
             return text(f"Logged — contact with {member_name} recorded today. Marge will update the briefing accordingly.")
 
         elif name == "add_prayer_request":
             member_id = None
             member_name_str = ""
-            if arguments.get("member_name"):
-                member = _find_member(arguments["member_name"])
+            submitted_by = _text_or(arguments.get("submitted_by"), "")
+            requested_member_name = _text_or(arguments.get("member_name"), "")
+            if requested_member_name:
+                member = _find_member(requested_member_name)
                 if member:
                     member_id = member["id"]
                     member_name_str = member["full_name"]
+                elif not submitted_by:
+                    submitted_by = requested_member_name
 
             body = {
                 "request_text": arguments["request_text"],
@@ -809,9 +933,16 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             }
             if member_id:
                 body["member_id"] = member_id
+            elif submitted_by:
+                body["submitted_by"] = submitted_by
 
             result = _post("/care/prayers/", body)
-            name_part = f"for {member_name_str} " if member_name_str else ""
+            if member_name_str:
+                name_part = f"for {_redact_secret_text(member_name_str)} "
+            elif submitted_by:
+                name_part = f"for {_redact_secret_text(submitted_by)} (not linked to a saved member yet) "
+            else:
+                name_part = ""
             privacy = "privately" if result.get("is_private") else "and added to the prayer list"
             return text(f"Prayer request {name_part}logged {privacy}. Marge will track it and prompt you to follow up.")
 
@@ -823,56 +954,66 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 params["include_private"] = arguments["include_private"]
             prayers = _get("/care/prayers/", params=params)
             if not prayers:
-                return text("No prayer requests found.")
+                return text(
+                    "No prayer requests are saved in this workspace yet. Add the first real prayer request "
+                    "before Marge treats prayer follow-up as checked."
+                )
             lines = [f"Found {len(prayers)} prayer request(s):"]
             for prayer in prayers[:20]:
                 privacy = "private" if prayer.get("is_private") else "public"
-                who = prayer.get("member_name") or prayer.get("submitted_by") or "Anonymous"
-                snippet = prayer.get("request_text", "")
+                who = _prayer_request_name(prayer)
+                snippet = _redact_secret_text(prayer.get("request_text", ""))
                 if len(snippet) > 90:
                     snippet = snippet[:89].rstrip() + "…"
+                status = _redact_secret_text(prayer.get("status") or "active")
                 lines.append(
-                    f"  • {who} (prayer ID: {prayer['id']}, {privacy}, {prayer['status']}) — {snippet}"
+                    f"  • {who} (prayer ID: {prayer['id']}, {privacy}, {status}) — {snippet}"
                 )
             return text("\n".join(lines))
 
         elif name == "add_member_note":
             member = _find_member(arguments["member_name"])
             if not member:
-                return text(f"Could not find a member named '{arguments['member_name']}'. Try list_members to search.")
+                return text(_member_not_found_message(
+                    arguments["member_name"],
+                    "I did not save the note because I cannot safely link it to a saved member.",
+                ))
             body = {
                 "note_text": arguments["note_text"],
                 "context_tag": arguments.get("context_tag", "general"),
             }
             _post(f"/members/{member['id']}/notes", body)
             return text(
-                f"Note logged for {member['full_name']}. "
+                f"Note logged for {_member_display_name(member)}. "
                 f"Marge will remember this and surface it in future briefings when relevant."
             )
 
         elif name == "draft_message":
             member = _find_member(arguments["member_name"])
             if not member:
-                return text(f"Could not find a member named '{arguments['member_name']}'. Try list_members to search.")
+                return text(_member_not_found_message(
+                    arguments["member_name"],
+                    "I did not draft a message because I cannot safely link it to a saved member.",
+                ))
             result = _post("/drafts/", {
                 "kind": "care",
                 "member_id": member["id"],
                 "situation": arguments.get("situation", "general check-in"),
             })
             draft = result.get("draft") or result.get("message") or json.dumps(result)
-            return text(f"Draft for {member['full_name']}:\n\n{draft}")
+            return text(f"Draft for {_member_display_name(member)}:\n\n{_redact_secret_text(draft)}")
 
         elif name == "get_assistant_desk":
             mode = arguments.get("mode") or "auto"
             data = _get("/assistant/desk", params={"mode": mode})
             lines = [
-                data.get("greeting") or "Marge assistant desk",
+                _redact_secret_text(data.get("greeting") or "Marge assistant desk"),
                 "",
-                f"Mode: {data.get('mode')} | Pastor: {data.get('pastor_name')} | Church: {data.get('church_name')}",
+                f"Mode: {_redact_secret_text(data.get('mode'))} | Pastor: {_redact_secret_text(data.get('pastor_name'))} | Church: {_redact_secret_text(data.get('church_name'))}",
                 f"Profile: {data.get('profile', {}).get('completion_percent', 0)}% complete",
                 "",
                 "Proactive summary:",
-                data.get("proactive_summary") or "No summary available.",
+                _redact_secret_text(data.get("proactive_summary") or "No summary available."),
             ]
             setup = data.get("setup_steps") or []
             if setup:
@@ -893,7 +1034,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             prompts = data.get("suggested_prompts") or []
             if prompts:
                 lines.extend(["", "Suggested prompts:"])
-                lines.extend(f"  • {prompt}" for prompt in prompts[:5])
+                lines.extend(f"  • {_redact_secret_text(prompt)}" for prompt in prompts[:5])
             return text("\n".join(lines))
 
         elif name == "list_assistant_chat_history":
@@ -906,22 +1047,23 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
         elif name == "clear_assistant_chat_history":
             result = _delete("/assistant/chat/history")
-            return text(result.get("message") or f"Cleared {result.get('messages_deleted', 0)} assistant chat message(s).")
+            return text(_redact_secret_text(result.get("message") or f"Cleared {result.get('messages_deleted', 0)} assistant chat message(s)."))
 
         elif name == "get_ministry_profile":
             profile = _get("/assistant/profile")
-            missing = profile.get("missing_fields") or []
+            missing = [_redact_secret_text(field) for field in profile.get("missing_fields") or []]
             lines = [
                 f"Profile completion: {profile.get('completion_percent', 0)}%",
-                f"Pastor: {profile.get('pastor_name') or 'not set'}",
-                f"Church: {profile.get('church_name') or 'not set'}",
-                f"Role: {profile.get('role_title') or 'not set'}",
-                f"Church context: {profile.get('church_context') or 'not set'}",
-                f"Follow-up burden: {profile.get('followup_pain') or 'not set'}",
-                f"Tools in use: {profile.get('tools_in_use') or 'not set'}",
-                f"Drafting voice: {profile.get('communication_style') or 'not set'}",
-                f"Weekly rhythm: {profile.get('weekly_rhythm') or 'not set'}",
-                f"Guardrails: {profile.get('guardrails') or 'not set'}",
+                f"Pastor: {_redact_secret_text(profile.get('pastor_name') or 'not set')}",
+                f"Church: {_redact_secret_text(profile.get('church_name') or 'not set')}",
+                f"Role: {_redact_secret_text(profile.get('role_title') or 'not set')}",
+                f"Church context: {_redact_secret_text(profile.get('church_context') or 'not set')}",
+                f"Follow-up burden: {_redact_secret_text(profile.get('followup_pain') or 'not set')}",
+                f"Support style: {_redact_secret_text(profile.get('support_preferences') or 'not set')}",
+                f"Tools in use: {_redact_secret_text(profile.get('tools_in_use') or 'not set')}",
+                f"Drafting voice: {_redact_secret_text(profile.get('communication_style') or 'not set')}",
+                f"Weekly rhythm: {_redact_secret_text(profile.get('weekly_rhythm') or 'not set')}",
+                f"Guardrails: {_redact_secret_text(profile.get('guardrails') or 'not set')}",
                 f"Missing fields: {', '.join(missing) if missing else 'none'}",
             ]
             return text("\n".join(lines))
@@ -935,6 +1077,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 "church_context",
                 "ministry_priorities",
                 "followup_pain",
+                "support_preferences",
                 "weekly_rhythm",
                 "communication_style",
                 "tools_in_use",
@@ -944,7 +1087,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             if not body:
                 return text("No ministry profile fields were provided to update.")
             profile = _patch("/assistant/profile", body)
-            missing = profile.get("missing_fields") or []
+            missing = [_redact_secret_text(field) for field in profile.get("missing_fields") or []]
             return text(
                 "Saved ministry profile context for Marge.\n"
                 f"Profile completion: {profile.get('completion_percent', 0)}%.\n"
@@ -954,23 +1097,30 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         elif name == "list_integrations":
             integrations = _get("/assistant/integrations")
             if not integrations:
-                return text("No integrations are registered.")
-            return text("Connector status:\n" + "\n".join(_format_integration(item) for item in integrations))
+                return text(
+                    "No integrations are registered. Connect a real church-tool provider, "
+                    "then check credentials before syncing ministry data."
+                )
+            return text(
+                "Connector status:\n"
+                "Note: MCP is only the local agent bridge; live provider readiness requires a verified church-tool connector.\n"
+                + "\n".join(_format_integration(item) for item in integrations)
+            )
 
         elif name == "start_integration_setup":
             provider = arguments["provider"]
             setup = _post(f"/assistant/integrations/{provider}/start", {})
             lines = [
-                f"{setup.get('display_name') or provider}: {setup.get('status')}",
-                setup.get("secure_note") or "Use secure setup. Do not paste secrets into chat.",
+                f"{_redact_secret_text(setup.get('display_name') or provider)}: {_redact_secret_text(setup.get('status'))}",
+                _redact_secret_text(setup.get("secure_note") or "Use secure setup. Do not paste secrets into chat."),
             ]
             if setup.get("authorization_url"):
-                lines.append(f"Authorization URL: {setup['authorization_url']}")
+                lines.append(f"Authorization URL: {_redact_secret_text(setup['authorization_url'])}")
             if setup.get("missing_config"):
-                lines.append("Server config needed: " + ", ".join(setup["missing_config"]))
+                lines.append("Server config needed: " + ", ".join(_redact_secret_text(item) for item in setup["missing_config"]))
             instructions = setup.get("instructions") or []
             if instructions:
-                lines.extend(["Instructions:"] + [f"  • {item}" for item in instructions])
+                lines.extend(["Instructions:"] + [f"  • {_redact_secret_text(item)}" for item in instructions])
             return text("\n".join(lines))
 
         elif name == "sync_integration":
@@ -994,25 +1144,22 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     )
                 return text(_format_sync_precheck_verification(provider, verification))
             return text(
-                f"{result.get('provider') or provider} sync {result.get('status')} at {result.get('synced_at')}.\n"
+                f"{_redact_secret_text(result.get('provider') or provider)} sync {_redact_secret_text(result.get('status'))} at {_redact_secret_text(result.get('synced_at'))}.\n"
                 f"Seen: {result.get('items_seen', 0)} | Created: {result.get('items_created', 0)} | "
                 f"Updated: {result.get('items_updated', 0)} | Actions prepared: {result.get('actions_prepared', 0)}.\n"
-                f"{result.get('message') or ''}"
+                f"{_redact_secret_text(result.get('message') or '')}"
             )
 
         elif name == "verify_integration":
             provider = arguments["provider"]
             result = _post(f"/assistant/integrations/{provider}/verify", {})
             identity = result.get("identity") or {}
-            identity_bits = []
-            for key in ["email", "display_name", "name", "id", "sample_people_access"]:
-                if key in identity and identity.get(key) is not None:
-                    identity_bits.append(f"{key}: {identity[key]}")
-            scope = result.get("credential_scope") or "server"
+            identity_bits = _format_identity_bits(identity)
+            scope = _redact_secret_text(result.get("credential_scope") or "server")
             return text(
-                f"{result.get('provider') or provider} verification {result.get('status')} at {result.get('verified_at')}.\n"
+                f"{_redact_secret_text(result.get('provider') or provider)} verification {_redact_secret_text(result.get('status'))} at {_redact_secret_text(result.get('verified_at'))}.\n"
                 f"Credential scope: {scope}.\n"
-                f"{result.get('message') or ''}"
+                f"{_redact_secret_text(result.get('message') or '')}"
                 + (f"\nIdentity: {', '.join(identity_bits)}" if identity_bits else "")
             )
 
@@ -1020,11 +1167,11 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             provider = arguments["provider"]
             result = _delete(f"/assistant/integrations/{provider}")
             return text(
-                f"{result.get('provider') or provider} disconnect {result.get('status')} at {result.get('disconnected_at')}.\n"
+                f"{_redact_secret_text(result.get('provider') or provider)} disconnect {_redact_secret_text(result.get('status'))} at {_redact_secret_text(result.get('disconnected_at'))}.\n"
                 f"Removed credentials: {result.get('removed_credentials', 0)} | "
                 f"Remaining credentials: {result.get('remaining_credentials', 0)} | "
                 f"Writeback enabled: {bool(result.get('write_enabled'))}.\n"
-                f"{result.get('message') or ''}"
+                f"{_redact_secret_text(result.get('message') or '')}"
             )
 
         elif name == "list_connected_context":
@@ -1037,13 +1184,18 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 params["limit"] = arguments["limit"]
             items = _get("/assistant/connected-items", params=params)
             if not items:
-                return text("No synced connected context found for this workspace.")
+                return text(
+                    "No synced connected context is available for this workspace yet. Connect a real provider, "
+                    "run the no-sync credential check, then ask Marge to sync when the pastor is ready."
+                )
             lines = [f"Found {len(items)} connected context item(s):"]
             for item in items[:30]:
-                when = item.get("occurred_at") or item.get("created_at") or "unknown date"
-                title = item.get("title") or "Untitled"
-                snippet = item.get("snippet") or item.get("subtitle") or ""
-                lines.append(f"  • #{item.get('id')} {item.get('provider')} {item.get('item_type')} — {title} ({when})" + (f": {snippet}" if snippet else ""))
+                when = _redact_secret_text(_text_or(item.get("occurred_at") or item.get("created_at"), "date not included by provider"))
+                title = _redact_secret_text(_text_or(item.get("title"), "title not included by provider"))
+                snippet = _redact_secret_text(item.get("snippet") or item.get("subtitle") or "")
+                provider = _redact_secret_text(item.get("provider") or "provider not included")
+                item_type = _redact_secret_text(item.get("item_type") or "item type not included")
+                lines.append(f"  • #{item.get('id')} {provider} {item_type} — {title} ({when})" + (f": {snippet}" if snippet else ""))
             return text("\n".join(lines))
 
         elif name == "list_approval_queue":
@@ -1053,7 +1205,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             }
             actions = _get("/assistant/actions", params=params)
             if not actions:
-                return text("No assistant actions found for that status.")
+                return text(
+                    "No assistant actions were found for that status. Prepare reviewable work, add the first real "
+                    "ministry record, or connect a credential-checked provider before treating the desk as clear."
+                )
             lines = [f"Found {len(actions)} assistant action(s):"]
             lines.extend(_format_action(action) for action in actions)
             return text("\n".join(lines))
@@ -1088,9 +1243,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return text(f"Unknown tool: {name}")
 
     except httpx.HTTPStatusError as e:
-        return text(f"Marge API error ({e.response.status_code}): {e.response.text}")
+        return text(f"Marge API error ({e.response.status_code}): {_http_error_detail(e)}")
     except Exception as e:
-        return text(f"Error: {str(e)}")
+        return text(f"Error: {_redact_secret_text(e)}")
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────

@@ -108,17 +108,16 @@ if _os.path.isdir(_frontend_dir):
 @app.get("/", tags=["root"])
 def root():
     """
-    Health check and welcome.
+    Public bootstrap pointer.
 
-    Marge is running if you see this.
+    Keep this generic: no pastor or church identity should be exposed before a
+    workspace session exists.
     """
-    pastor_name = os.getenv("PASTOR_NAME", "Pastor")
-    church_name = os.getenv("CHURCH_NAME", "your church")
     return {
         "status": "ok",
-        "message": f"Good morning, {pastor_name}. Marge is ready.",
-        "church": church_name,
+        "message": "Marge is running. Create or resume a private workspace before adding pastoral data.",
         "version": "0.1.0",
+        "app": "/app",
         "docs": "/docs",
     }
 

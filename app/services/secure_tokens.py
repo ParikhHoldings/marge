@@ -1,9 +1,9 @@
 """
-Encrypted token storage helpers for Marge integrations.
+Encrypted connector credential storage helpers for Marge integrations.
 
-Marge may eventually hold OAuth refresh tokens for email, calendar, and church
-management systems. Those payloads must be encrypted before they touch the
-database and must never be returned to the browser or chat.
+Marge may hold OAuth refresh tokens and workspace API-key connector payloads for
+email, calendar, and church management systems. Those payloads must be encrypted
+before they touch the database and must never be returned to the browser or chat.
 """
 
 import json
@@ -38,7 +38,7 @@ def generate_encryption_key() -> str:
 def _fernet() -> Fernet:
     key = os.getenv(ENCRYPTION_KEY_ENV)
     if not key:
-        raise SecureTokenConfigError(f"{ENCRYPTION_KEY_ENV} is required before OAuth tokens can be stored.")
+        raise SecureTokenConfigError(f"{ENCRYPTION_KEY_ENV} is required before connector credentials can be stored.")
     try:
         return Fernet(key.encode("ascii"))
     except Exception as exc:

@@ -59,6 +59,17 @@ def assert_true(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def pastor_display_name(name: str) -> str:
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return "Pastor"
+    titled_prefixes = ("pastor", "rev", "reverend", "bishop", "elder", "father", "dr")
+    first_word = cleaned.split()[0].strip(".").lower()
+    if first_word in titled_prefixes:
+        return cleaned
+    return f"Pastor {cleaned}"
+
+
 def cleanup_local_account(api_url: str, account_id: int | None) -> None:
     if account_id is None or not is_local_url(api_url):
         return
@@ -139,7 +150,8 @@ def main() -> int:
     suffix = int(time.time())
     today = date.today().isoformat()
     church_name = args.church_name or f"First Run Verification Church {suffix}"
-    pastor_name = args.pastor_name or f"Pastor First Run Verification {suffix}"
+    pastor_name = args.pastor_name or f"First Run Verification {suffix}"
+    pastor_display = pastor_display_name(pastor_name)
     email = f"first-run-verification-{suffix}@example.test"
     account_id = None
 
@@ -166,6 +178,10 @@ def main() -> int:
         initial_desk = request("GET", api_url, "/assistant/desk?mode=auto", token=session_token)
         initial_question = initial_desk.get("interview_question") or {}
         assert_true(initial_desk.get("mode") == "live", "A real workspace should start in live mode.")
+        assert_true(
+            f"Good morning, {pastor_display}." in (initial_desk.get("greeting") or ""),
+            "First-run desk greeting should use a pastoral display name even when signup used a bare name.",
+        )
         assert_true(church_name in (initial_question.get("question") or ""), "First question should name the pastor's church.")
         assert_true("Here are your people for today" not in (initial_desk.get("greeting") or ""), "New live workspaces should not show demo people.")
 
@@ -175,6 +191,7 @@ def main() -> int:
             "Our church tradition is non-denominational with Baptist roots; avoid insider language with guests.",
             "Our biggest pain is visitor follow-up and private prayer follow-up; they fall through the cracks.",
             "My first priority this month is closing loops with first-time guests and private prayer needs.",
+            "Nudge me gently, protect my rest, and surface the people I am most likely to miss.",
             "Our stack is Planning Center and Gmail.",
             "Keep my drafts warm and brief. Fridays are my day off, Thursdays are sermon prep, hospital visits are Tuesday afternoons, and ask me before sending or changing anything.",
         ]
@@ -185,6 +202,7 @@ def main() -> int:
         profile = request("GET", api_url, "/assistant/profile", token=session_token)
         assert_true(profile.get("completion_percent") == 100, "Onboarding should complete the ministry profile.")
         assert_true("Planning Center" in (profile.get("tools_in_use") or ""), "Saved tools should include Planning Center.")
+        assert_true("Nudge me gently" in (profile.get("support_preferences") or ""), "Saved support preferences should preserve how the pastor wants Marge to help.")
         assert_true("warm and brief" in (profile.get("communication_style") or "").lower(), "Saved drafting voice should be preserved.")
 
         desk = request("GET", api_url, "/assistant/desk?mode=auto", token=session_token)

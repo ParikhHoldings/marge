@@ -206,6 +206,7 @@ class PastorProfile(Base):
     faith_tradition = Column(Text, nullable=True)
     ministry_priorities = Column(Text, nullable=True)
     followup_pain = Column(Text, nullable=True)
+    support_preferences = Column(Text, nullable=True)
     weekly_rhythm = Column(Text, nullable=True)
     communication_style = Column(Text, nullable=True)
     tools_in_use = Column(Text, nullable=True)
@@ -331,6 +332,7 @@ class AccountPastorProfile(Base):
     faith_tradition = Column(Text, nullable=True)
     ministry_priorities = Column(Text, nullable=True)
     followup_pain = Column(Text, nullable=True)
+    support_preferences = Column(Text, nullable=True)
     weekly_rhythm = Column(Text, nullable=True)
     communication_style = Column(Text, nullable=True)
     tools_in_use = Column(Text, nullable=True)
@@ -345,8 +347,9 @@ class AccountPastorProfile(Base):
 
 class IntegrationConnection(Base):
     """
-    Non-secret connector status. Secrets and OAuth tokens should live in a
-    provider vault or environment-managed secret store, never in this table.
+    Non-secret connector status. Secrets, API keys, and OAuth tokens should
+    live in IntegrationCredential or an environment-managed secret store, never
+    in this table.
     """
 
     __tablename__ = "integration_connections"
@@ -398,11 +401,11 @@ class IntegrationOAuthState(Base):
 
 class IntegrationCredential(Base):
     """
-    Encrypted OAuth token payload for a connector.
+    Encrypted connector credential payload.
 
-    Access tokens, refresh tokens, and provider token responses are encrypted
-    with MARGE_ENCRYPTION_KEY before they are persisted. Tokens are never
-    returned by the API.
+    OAuth token responses and workspace API-key payloads are encrypted with
+    MARGE_ENCRYPTION_KEY before they are persisted. Credential payloads are
+    never returned by the API.
     """
 
     __tablename__ = "integration_credentials"

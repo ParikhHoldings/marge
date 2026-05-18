@@ -5,13 +5,14 @@ and chat responses grounded in Marge's current data.
 
 import base64
 import html
+import ipaddress
 import json
 import os
 import re
 import secrets
 from email.message import EmailMessage
 from email.utils import parseaddr
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from datetime import date, datetime, timedelta
 from typing import Any, List, Literal, Optional
 
@@ -64,6 +65,7 @@ from app.services.accounts import (
     account_tokens_required,
     normalize_role,
     require_role,
+    require_workspace,
     scoped_query,
     session_cookie_name,
     session_cookie_samesite,
@@ -88,6 +90,62 @@ OAUTH_REQUEST_TIMEOUT_SECONDS = 15
 LOGIN_LINK_TTL_MINUTES = 20
 LOGIN_LINK_RESEND_COOLDOWN_MINUTES = 5
 DEFAULT_GUARDRAILS = "Do not send messages, create calendar events, or write to external systems without approval."
+SENSITIVE_IDENTITY_KEY_TERMS = {
+    "access_token",
+    "authorization",
+    "bearer",
+    "client_secret",
+    "cookie",
+    "id_token",
+    "password",
+    "refresh_token",
+    "secret",
+    "token",
+    "token_ciphertext",
+    "api_key",
+    "apikey",
+}
+SENSITIVE_IDENTITY_VALUE_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|client[_-]?secret|token[_-]?ciphertext)\s*[:=]\s*\S+",
+        r"\bauthorization\s*[:=]\s*bearer\s+\S+",
+        r"\bbearer\s+[A-Za-z0-9._~+/\-]{16,}",
+        r"\bmarge_sess_[A-Za-z0-9._~+\-/=]{8,}",
+        r"\bya29\.[A-Za-z0-9._~+\-/=]{8,}",
+        r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{8,}",
+    ]
+]
+SECRET_TEXT_REDACTIONS = [
+    (
+        re.compile(
+            r"\b(access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|client[_-]?secret|token[_-]?ciphertext)\s*[:=]\s*[^\s,;]+",
+            re.IGNORECASE,
+        ),
+        r"\1=<redacted>",
+    ),
+    (re.compile(r"\b(authorization\s*[:=]\s*bearer\s+)[^\s,;]+", re.IGNORECASE), r"\1<redacted>"),
+    (re.compile(r"\b(bearer\s+)[A-Za-z0-9._~+/\-]{16,}", re.IGNORECASE), r"\1<redacted>"),
+    (re.compile(r"\bmarge_sess_[A-Za-z0-9._~+\-/=]{8,}"), "<redacted-marge-session>"),
+    (re.compile(r"\bya29\.[A-Za-z0-9._~+\-/=]{8,}"), "<redacted-google-token>"),
+    (
+        re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{8,}"),
+        "<redacted-jwt>",
+    ),
+]
+
+
+def _redact_secret_text(value) -> str:
+    if isinstance(value, (dict, list)):
+        try:
+            text = json.dumps(value, default=str)
+        except (TypeError, ValueError):
+            text = str(value)
+    else:
+        text = str(value or "")
+    for pattern, replacement in SECRET_TEXT_REDACTIONS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 ONBOARDING_QUESTIONS = [
@@ -140,10 +198,16 @@ ONBOARDING_QUESTIONS = [
         "placeholder": "Close loops with first-time guests, protect sermon prep, follow up on private prayer needs...",
     },
     {
+        "id": "support_preferences",
+        "label": "How to support you",
+        "question": "How should Marge support you personally when ministry gets heavy?",
+        "placeholder": "Nudge me gently, protect my rest, surface what I am likely to miss, keep me from carrying every loop alone...",
+    },
+    {
         "id": "tools_in_use",
         "label": "Tools",
         "question": "What tools does the church already use?",
-        "placeholder": "Planning Center, Rock RMS, Gmail, Outlook, Breeze...",
+        "placeholder": "Planning Center, Gmail/Google Workspace, Outlook/Microsoft 365, Rock RMS, Breeze...",
     },
     {
         "id": "communication_style",
@@ -175,6 +239,7 @@ class PastorProfilePayload(BaseModel):
     faith_tradition: Optional[str] = None
     ministry_priorities: Optional[str] = None
     followup_pain: Optional[str] = None
+    support_preferences: Optional[str] = None
     weekly_rhythm: Optional[str] = None
     communication_style: Optional[str] = None
     tools_in_use: Optional[str] = None
@@ -441,7 +506,7 @@ class IntegrationSyncResponse(BaseModel):
 class IntegrationVerifyResponse(BaseModel):
     provider: str
     status: str
-    verified_at: datetime
+    verified_at: Optional[datetime] = None
     credential_scope: Optional[str] = None
     identity: dict = {}
     message: str
@@ -893,6 +958,7 @@ def start_integration_setup(
 ):
     access = _account_access_from_token(db, x_marge_account_token)
     _require_role(access, ADMIN_ROLES, "start connector setup")
+    _require_workspace(access, "start connector setup")
     account = access.account
     return _start_integration(provider, db, account, access.user)
 
@@ -906,6 +972,7 @@ def save_integration_credentials(
 ):
     access = _account_access_from_token(db, x_marge_account_token)
     _require_role(access, ADMIN_ROLES, "configure connector credentials")
+    _require_workspace(access, "configure connector credentials")
     return _save_api_key_integration(db, provider, payload, access.account)
 
 
@@ -927,6 +994,7 @@ def update_integration_policy(
 ):
     access = _account_access_from_token(db, x_marge_account_token)
     _require_role(access, ADMIN_ROLES, "change connector writeback policy")
+    _require_workspace(access, "change connector writeback policy")
     account = access.account
     definitions = {item["provider"]: item for item in _integration_definitions()}
     if provider not in definitions:
@@ -963,6 +1031,7 @@ def sync_integration(
 ):
     access = _account_access_from_token(db, x_marge_account_token)
     _require_role(access, PASTORAL_ROLES, "sync connected ministry tools")
+    _require_workspace(access, "sync connected ministry tools")
     account = access.account
     definitions = {item["provider"]: item for item in _integration_definitions()}
     definition = definitions.get(provider)
@@ -995,6 +1064,7 @@ def verify_integration(
 ):
     access = _account_access_from_token(db, x_marge_account_token)
     _require_role(access, PASTORAL_ROLES, "verify connected ministry tools")
+    _require_workspace(access, "verify connected ministry tools")
     return _verify_integration(db, provider, access.account, access.user)
 
 
@@ -1006,6 +1076,7 @@ def disconnect_integration(
 ):
     access = _account_access_from_token(db, x_marge_account_token)
     _require_role(access, PASTORAL_ROLES, "disconnect connected ministry tools")
+    _require_workspace(access, "disconnect connected ministry tools")
     return _disconnect_integration(db, provider, access.account, access.user)
 
 
@@ -1013,6 +1084,7 @@ def disconnect_integration(
 def list_connected_items(
     provider: Optional[str] = Query(None),
     item_type: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     x_marge_account_token: Optional[str] = Header(None),
     db: Session = Depends(get_db),
@@ -1025,7 +1097,12 @@ def list_connected_items(
         query = query.filter(ConnectedContextItem.provider == provider)
     if item_type:
         query = query.filter(ConnectedContextItem.item_type == item_type)
-    items = query.order_by(ConnectedContextItem.occurred_at.desc().nullslast(), ConnectedContextItem.created_at.desc()).limit(limit).all()
+    items = (
+        query.order_by(ConnectedContextItem.occurred_at.desc().nullslast(), ConnectedContextItem.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return [_connected_item_response(item) for item in items]
 
 
@@ -1052,6 +1129,7 @@ def list_audit_log(
 @router.get("/actions", response_model=List[AssistantActionResponse], summary="List assistant approval queue")
 def list_assistant_actions(
     status: Optional[str] = Query("pending"),
+    skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     x_marge_account_token: Optional[str] = Header(None),
     db: Session = Depends(get_db),
@@ -1062,7 +1140,7 @@ def list_assistant_actions(
     query = scoped_query(db.query(AssistantAction), AssistantAction, account)
     if status and status != "all":
         query = query.filter(AssistantAction.status == status)
-    actions = query.order_by(AssistantAction.created_at.desc()).limit(limit).all()
+    actions = query.order_by(AssistantAction.created_at.desc()).offset(skip).limit(limit).all()
     return [_action_response(action) for action in actions]
 
 
@@ -1130,7 +1208,7 @@ def prepare_assistant_actions(
     priorities = _priority_items(briefing)
     email_drafts = _email_drafts(briefing, priorities)
     calendar_blocks = _calendar_blocks(profile, priorities)
-    integrations = _integration_statuses(db, account)
+    integrations = _integration_statuses(db, account, access.user)
     setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
     actions = _prepare_actions_from_desk(db, effective_mode, email_drafts, calendar_blocks, priorities, profile, account, email_limit=email_limit)
     actions.extend(_prepare_setup_actions(db, profile, setup_steps, account))
@@ -1159,7 +1237,7 @@ def approve_assistant_action(
     return _action_response(action)
 
 
-@router.post("/actions/{action_id}/execute", response_model=AssistantActionResponse, summary="Mark an approved assistant action executed")
+@router.post("/actions/{action_id}/execute", response_model=AssistantActionResponse, summary="Execute an approved assistant action or complete a local reminder")
 def execute_assistant_action(
     action_id: int,
     x_marge_account_token: Optional[str] = Header(None),
@@ -1229,7 +1307,10 @@ def complete_integration_callback(
         provider=provider,
         display_name=result["display_name"],
         ok=True,
-        message="Marge stored the provider token payload encrypted server-side. You can close this window and return to the assistant desk.",
+        message=(
+            "Marge stored the provider token payload encrypted server-side. "
+            "Return to the assistant desk and run Check credentials before syncing ministry data."
+        ),
     )
 
 
@@ -1341,7 +1422,28 @@ def assistant_chat(
     calendar_blocks = _calendar_blocks(profile, priorities)
     lower = request.message.lower()
 
-    profile_update = _maybe_save_profile_context(db, profile, account, request.message, lower)
+    if _profile_is_complete(profile) and _pastor_pressure_requested(lower):
+        integrations = _integration_statuses(db, account, access.user)
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+        pending_actions = _pending_assistant_actions(db, account)
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _pastor_pressure_response(
+                profile,
+                priorities,
+                email_drafts,
+                calendar_blocks,
+                setup_steps,
+                pending_actions,
+                effective_mode,
+                account,
+            ),
+        )
+
+    profile_update = _maybe_save_profile_context(db, profile, account, access.user, request.message, lower)
     if profile_update:
         return _chat_turn_response(db, account, access.user, request.message,
             reply=profile_update["reply"],
@@ -1353,7 +1455,7 @@ def assistant_chat(
             profile=_profile_response(profile, account),
         )
 
-    onboarding_save = _maybe_save_onboarding_answer(db, profile, account, request.message, lower)
+    onboarding_save = _maybe_save_onboarding_answer(db, profile, account, access.user, request.message, lower)
     if onboarding_save:
         return _chat_turn_response(db, account, access.user, request.message,
             reply=onboarding_save["reply"],
@@ -1363,6 +1465,17 @@ def assistant_chat(
             actions=onboarding_save.get("actions", []),
             suggested_prompts=onboarding_save.get("suggested_prompts", _suggested_prompts(profile, priorities)),
             profile=_profile_response(profile, account),
+        )
+
+    if _support_style_requested(lower):
+        integrations = _integration_statuses(db, account, access.user)
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _support_style_chat_response(setup_steps, priorities, effective_mode, profile, account),
         )
 
     if _context_usage_requested(lower):
@@ -1385,6 +1498,38 @@ def assistant_chat(
             access.user,
             request.message,
             _secure_connections_chat_response(setup_steps, effective_mode, profile, account),
+        )
+
+    if _profile_setting_lookup_requested(lower):
+        integrations = _integration_statuses(db, account, access.user)
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _profile_setting_lookup_response(profile, setup_steps, effective_mode, account, lower),
+        )
+
+    if _pastor_pressure_requested(lower):
+        integrations = _integration_statuses(db, account, access.user)
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+        pending_actions = _pending_assistant_actions(db, account)
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _pastor_pressure_response(
+                profile,
+                priorities,
+                email_drafts,
+                calendar_blocks,
+                setup_steps,
+                pending_actions,
+                effective_mode,
+                account,
+            ),
         )
 
     if _calendar_details_help_requested(lower):
@@ -1410,6 +1555,21 @@ def assistant_chat(
                 actions=[_desk_item_from_action(calendar_action)],
                 suggested_prompts=["Approve this calendar event.", "Show my approvals."],
             )
+        event_payload = _calendar_event_payload_from_message(request.message)
+        if event_payload:
+            integrations = _integration_statuses(db, account, access.user)
+            setup_steps = _calendar_write_setup_steps(integrations)[:2]
+            return _chat_turn_response(db, account, access.user, request.message,
+                reply=(
+                    "I have enough event details to stage this, but I do not see a credential-checked Google Workspace or Microsoft 365 calendar yet. "
+                    "I attached the setup or credential-check cards. I will not create an external calendar event until credentials are checked, "
+                    "writeback policy allows calendar_block, and you approve that exact event."
+                ),
+                intent="calendar_event_provider_not_ready",
+                mode=effective_mode,
+                actions=setup_steps,
+                suggested_prompts=_connector_setup_or_check_prompts(setup_steps),
+            )
         return _chat_turn_response(db, account, access.user, request.message,
             reply=(
                 "I can queue a calendar event once I have a connected Google Workspace or Microsoft 365 calendar, "
@@ -1434,11 +1594,11 @@ def assistant_chat(
         )
 
     if _generic_person_capture_prompt_requested(lower):
-        seed_step = _seed_context_step(db, account, profile, effective_mode)
+        seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
         return _persist_chat_response(db, account, access.user, request.message, _person_capture_guidance_response(seed_step, effective_mode, profile, account))
 
     if _data_seed_help_requested(lower) and _looks_like_pastoral_update_with_named_person(request.message, lower):
-        pastoral_update = _maybe_save_pastoral_update(db, profile, account, request.message, lower, effective_mode)
+        pastoral_update = _maybe_save_pastoral_update(db, profile, account, access.user, request.message, lower, effective_mode)
         if pastoral_update:
             return _chat_turn_response(db, account, access.user, request.message,
                 reply=pastoral_update["reply"],
@@ -1451,7 +1611,7 @@ def assistant_chat(
             )
 
     if _data_seed_help_requested(lower):
-        seed_step = _seed_context_step(db, account, profile, effective_mode)
+        seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
         if seed_step:
             return _persist_chat_response(db, account, access.user, request.message, _data_seed_chat_response(seed_step, effective_mode, profile, account))
 
@@ -1488,7 +1648,7 @@ def assistant_chat(
         )
 
     if _first_record_coaching_requested(lower):
-        seed_step = _seed_context_step(db, account, profile, effective_mode)
+        seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
         if seed_step:
             return _persist_chat_response(db, account, access.user, request.message, _first_record_coaching_response(seed_step, effective_mode, profile, account))
         if _mentions(lower, ["private prayer", "prayer request", "prayer"]):
@@ -1497,18 +1657,36 @@ def assistant_chat(
             return _persist_chat_response(db, account, access.user, request.message, _care_case_guidance_response(db, profile, account, effective_mode))
 
     if _generic_prayer_request_prompt_requested(lower):
-        seed_step = _seed_context_step(db, account, profile, effective_mode)
+        seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
         if seed_step and seed_step.form == "prayer":
             return _persist_chat_response(db, account, access.user, request.message, _data_seed_chat_response(seed_step, effective_mode, profile, account))
         return _persist_chat_response(db, account, access.user, request.message, _private_prayer_guidance_response(db, profile, account, effective_mode))
 
     if _generic_care_case_prompt_requested(lower):
-        seed_step = _seed_context_step(db, account, profile, effective_mode)
+        seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
         if seed_step and (_data_seed_is_care(seed_step) or seed_step.form == "person"):
             return _persist_chat_response(db, account, access.user, request.message, _data_seed_chat_response(seed_step, effective_mode, profile, account))
         return _persist_chat_response(db, account, access.user, request.message, _care_case_guidance_response(db, profile, account, effective_mode))
 
-    pastoral_update = _maybe_save_pastoral_update(db, profile, account, request.message, lower, effective_mode)
+    if _pastoral_reminder_lookup_requested(lower):
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _pastoral_reminder_lookup_response(db, profile, account, effective_mode),
+        )
+
+    if _pastoral_reminder_requested(lower):
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _pastoral_reminder_chat_response(db, profile, account, request.message, lower, effective_mode),
+        )
+
+    pastoral_update = _maybe_save_pastoral_update(db, profile, account, access.user, request.message, lower, effective_mode)
     if pastoral_update:
         return _chat_turn_response(db, account, access.user, request.message,
             reply=pastoral_update["reply"],
@@ -1520,7 +1698,7 @@ def assistant_chat(
             profile=_profile_response(profile, account),
         )
 
-    action_command = _maybe_handle_action_command(db, account, access.user, request.message, lower, effective_mode)
+    action_command = _maybe_handle_action_command(db, account, access.user, profile, priorities, request.message, lower, effective_mode)
     if action_command:
         return _persist_chat_response(db, account, access.user, request.message, action_command)
 
@@ -1536,7 +1714,7 @@ def assistant_chat(
             profile=_profile_response(profile, account),
         )
 
-    connected_import = _maybe_import_connected_person_from_chat(db, profile, account, request.message, lower, effective_mode)
+    connected_import = _maybe_import_connected_person_from_chat(db, profile, account, access.user, request.message, lower, effective_mode)
     if connected_import:
         return _chat_turn_response(db, account, access.user, request.message,
             reply=connected_import["reply"],
@@ -1578,7 +1756,7 @@ def assistant_chat(
             account,
             access.user,
             request.message,
-            _absence_draft_chat_response(db, profile, account, email_drafts, priorities, effective_mode),
+            _absence_draft_chat_response(db, profile, account, access.user, email_drafts, priorities, effective_mode),
         )
 
     if _absence_context_requested(lower):
@@ -1587,7 +1765,7 @@ def assistant_chat(
             account,
             access.user,
             request.message,
-            _absence_context_chat_response(profile, priorities, effective_mode, account),
+            _absence_context_chat_response(db, profile, priorities, effective_mode, account, access.user),
         )
 
     if _connector_verification_requested(lower):
@@ -1625,7 +1803,7 @@ def assistant_chat(
             verification = _verify_integration(db, provider, account, access.user)
         except HTTPException as exc:
             return _chat_turn_response(db, account, access.user, request.message,
-                reply=f"I could not verify {status.display_name} yet: {exc.detail}",
+                reply=f"I could not verify {status.display_name} yet: {_redact_secret_text(exc.detail)}",
                 intent="integration_verify_failed",
                 mode=effective_mode,
                 actions=[],
@@ -1657,6 +1835,10 @@ def assistant_chat(
         )
 
     if _mentions(lower, ["sync", "refresh", "pull"]) and _mentions(lower, ["rock", "rock rms"]):
+        integrations = _integration_statuses(db, account, access.user)
+        not_ready = _provider_sync_not_ready_response(profile, integrations, "rock", account, effective_mode)
+        if not_ready:
+            return _chat_turn_response(db, account, access.user, request.message, **not_ready)
         try:
             sync_result = _sync_rock_rms(db, account=account)
             if sync_result.status == "synced":
@@ -1666,13 +1848,13 @@ def assistant_chat(
                 )
                 prompts = ["Who has been absent?", "Show my approval queue."]
             else:
-                reply = f"I could not sync Rock RMS yet: {sync_result.message}"
+                reply = f"I could not sync Rock RMS yet: {_redact_secret_text(sync_result.message)}"
                 prompts = ["Open integrations.", "What can you do before Rock is configured?"]
         except HTTPException as exc:
-            verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "rock", exc)
+            verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "rock", exc)
             if verify_first:
                 return verify_first
-            reply = f"I could not sync Rock RMS yet: {exc.detail}"
+            reply = f"I could not sync Rock RMS yet: {_redact_secret_text(exc.detail)}"
             prompts = ["Open integrations.", "Check Rock credentials."]
         return _chat_turn_response(db, account, access.user, request.message,
             reply=reply,
@@ -1683,6 +1865,10 @@ def assistant_chat(
         )
 
     if _mentions(lower, ["sync", "refresh", "pull"]) and _mentions(lower, ["planning center", "church center", "pco"]):
+        integrations = _integration_statuses(db, account, access.user)
+        not_ready = _provider_sync_not_ready_response(profile, integrations, "planning_center", account, effective_mode)
+        if not_ready:
+            return _chat_turn_response(db, account, access.user, request.message, **not_ready)
         try:
             sync_result = _sync_planning_center(db, people_limit=25, calendar_days=14, account=account, user=access.user)
             reply = (
@@ -1697,11 +1883,11 @@ def assistant_chat(
                 suggested_prompts=["Show Planning Center context.", "What events need prep?"],
             )
         except HTTPException as exc:
-            verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "planning_center", exc)
+            verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "planning_center", exc)
             if verify_first:
                 return verify_first
             return _chat_turn_response(db, account, access.user, request.message,
-                reply=f"I could not sync Planning Center yet: {exc.detail}",
+                reply=f"I could not sync Planning Center yet: {_redact_secret_text(exc.detail)}",
                 intent="sync_planning_center_unavailable",
                 mode=effective_mode,
                 actions=[],
@@ -1709,6 +1895,10 @@ def assistant_chat(
             )
 
     if _mentions(lower, ["sync", "refresh", "pull"]) and _mentions(lower, ["breeze", "breeze chms"]):
+        integrations = _integration_statuses(db, account, access.user)
+        not_ready = _provider_sync_not_ready_response(profile, integrations, "breeze", account, effective_mode)
+        if not_ready:
+            return _chat_turn_response(db, account, access.user, request.message, **not_ready)
         try:
             sync_result = _sync_breeze(db, people_limit=25, calendar_days=14, account=account)
             if sync_result.status == "synced":
@@ -1718,13 +1908,13 @@ def assistant_chat(
                 )
                 prompts = ["Show Breeze context.", "What events need prep?"]
             else:
-                reply = f"I could not sync Breeze yet: {sync_result.message}"
+                reply = f"I could not sync Breeze yet: {_redact_secret_text(sync_result.message)}"
                 prompts = ["Open integrations.", "What can you do before Breeze is configured?"]
         except HTTPException as exc:
-            verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "breeze", exc)
+            verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "breeze", exc)
             if verify_first:
                 return verify_first
-            reply = f"I could not sync Breeze yet: {exc.detail}"
+            reply = f"I could not sync Breeze yet: {_redact_secret_text(exc.detail)}"
             prompts = ["Open integrations.", "Check Breeze credentials."]
         return _chat_turn_response(db, account, access.user, request.message,
             reply=reply,
@@ -1751,11 +1941,11 @@ def assistant_chat(
                     suggested_prompts=["Show my synced inbox.", "Queue replies for these.", "What meetings need prep?"],
                 )
             except HTTPException as exc:
-                verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "microsoft_365", exc)
+                verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "microsoft_365", exc)
                 if verify_first:
                     return verify_first
                 return _chat_turn_response(db, account, access.user, request.message,
-                    reply=f"I could not sync Microsoft 365 yet: {exc.detail}",
+                    reply=f"I could not sync Microsoft 365 yet: {_redact_secret_text(exc.detail)}",
                     intent="sync_microsoft_365_unavailable",
                     mode=effective_mode,
                     actions=[],
@@ -1776,22 +1966,23 @@ def assistant_chat(
                     suggested_prompts=["Show my synced inbox.", "Queue replies for these.", "What meetings need prep?"],
                 )
             except HTTPException as exc:
-                verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "google_workspace", exc)
+                verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "google_workspace", exc)
                 if verify_first:
                     return verify_first
                 return _chat_turn_response(db, account, access.user, request.message,
-                    reply=f"I could not sync Google Workspace yet: {exc.detail}",
+                    reply=f"I could not sync Google Workspace yet: {_redact_secret_text(exc.detail)}",
                     intent="sync_google_workspace_unavailable",
                     mode=effective_mode,
                     actions=[],
                     suggested_prompts=["Open integrations.", "Connect Google Workspace."],
                 )
-        return _chat_turn_response(db, account, access.user, request.message,
-            reply="I do not see a connected mailbox yet. Connect Google Workspace or Microsoft 365 first; I will verify credentials before syncing ministry mail.",
-            intent="sync_mailbox_not_connected",
-            mode=effective_mode,
-            actions=[],
-            suggested_prompts=["Open integrations.", "Connect Google Workspace.", "Connect Microsoft 365."],
+        integrations = _integration_statuses(db, account, access.user)
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _mailbox_sync_not_connected_response(profile, integrations, account, effective_mode),
         )
 
     if _generic_calendar_sync_requested(lower):
@@ -1811,11 +2002,11 @@ def assistant_chat(
                     suggested_prompts=["Show Planning Center context.", "What events need prep?"],
                 )
             except HTTPException as exc:
-                verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "planning_center", exc)
+                verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "planning_center", exc)
                 if verify_first:
                     return verify_first
                 return _chat_turn_response(db, account, access.user, request.message,
-                    reply=f"I could not sync Planning Center yet: {exc.detail}",
+                    reply=f"I could not sync Planning Center yet: {_redact_secret_text(exc.detail)}",
                     intent="sync_planning_center_unavailable",
                     mode=effective_mode,
                     actions=[],
@@ -1831,13 +2022,13 @@ def assistant_chat(
                     )
                     prompts = ["Show Breeze context.", "What events need prep?"]
                 else:
-                    reply = f"I could not sync Breeze yet: {sync_result.message}"
+                    reply = f"I could not sync Breeze yet: {_redact_secret_text(sync_result.message)}"
                     prompts = ["Open integrations.", "Connect Breeze."]
             except HTTPException as exc:
-                verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "breeze", exc)
+                verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "breeze", exc)
                 if verify_first:
                     return verify_first
-                reply = f"I could not sync Breeze yet: {exc.detail}"
+                reply = f"I could not sync Breeze yet: {_redact_secret_text(exc.detail)}"
                 prompts = ["Open integrations.", "Check Breeze credentials."]
             return _chat_turn_response(db, account, access.user, request.message,
                 reply=reply,
@@ -1861,11 +2052,11 @@ def assistant_chat(
                     suggested_prompts=["Show my synced calendar.", "What meetings need prep?"],
                 )
             except HTTPException as exc:
-                verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "microsoft_365", exc)
+                verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "microsoft_365", exc)
                 if verify_first:
                     return verify_first
                 return _chat_turn_response(db, account, access.user, request.message,
-                    reply=f"I could not sync Microsoft 365 yet: {exc.detail}",
+                    reply=f"I could not sync Microsoft 365 yet: {_redact_secret_text(exc.detail)}",
                     intent="sync_microsoft_365_unavailable",
                     mode=effective_mode,
                     actions=[],
@@ -1886,25 +2077,30 @@ def assistant_chat(
                     suggested_prompts=["Show my synced calendar.", "What meetings need prep?"],
                 )
             except HTTPException as exc:
-                verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "google_workspace", exc)
+                verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "google_workspace", exc)
                 if verify_first:
                     return verify_first
                 return _chat_turn_response(db, account, access.user, request.message,
-                    reply=f"I could not sync Google Workspace yet: {exc.detail}",
+                    reply=f"I could not sync Google Workspace yet: {_redact_secret_text(exc.detail)}",
                     intent="sync_google_workspace_unavailable",
                     mode=effective_mode,
                     actions=[],
                     suggested_prompts=["Open integrations.", "Connect Google Workspace."],
                 )
-        return _chat_turn_response(db, account, access.user, request.message,
-            reply="I do not see a connected calendar yet. Connect Planning Center, Google Workspace, Microsoft 365, or Breeze first; I will verify credentials before syncing event context.",
-            intent="sync_calendar_not_connected",
-            mode=effective_mode,
-            actions=[],
-            suggested_prompts=["Open integrations.", "Connect Planning Center.", "Connect Google Workspace."],
+        integrations = _integration_statuses(db, account, access.user)
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _calendar_sync_not_connected_response(profile, integrations, account, effective_mode),
         )
 
     if _mentions(lower, ["sync", "refresh", "pull"]) and _mentions(lower, ["microsoft", "microsoft 365", "office 365", "outlook"]):
+        integrations = _integration_statuses(db, account, access.user)
+        not_ready = _provider_sync_not_ready_response(profile, integrations, "microsoft_365", account, effective_mode)
+        if not_ready:
+            return _chat_turn_response(db, account, access.user, request.message, **not_ready)
         try:
             sync_result = _sync_microsoft_365(db, email_limit=5, calendar_days=14, account=account, user=access.user)
             reply = (
@@ -1919,11 +2115,11 @@ def assistant_chat(
                 suggested_prompts=["Show my synced inbox.", "What meetings need prep?"],
             )
         except HTTPException as exc:
-            verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "microsoft_365", exc)
+            verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "microsoft_365", exc)
             if verify_first:
                 return verify_first
             return _chat_turn_response(db, account, access.user, request.message,
-                reply=f"I could not sync Microsoft 365 yet: {exc.detail}",
+                reply=f"I could not sync Microsoft 365 yet: {_redact_secret_text(exc.detail)}",
                 intent="sync_microsoft_365_unavailable",
                 mode=effective_mode,
                 actions=[],
@@ -1931,6 +2127,10 @@ def assistant_chat(
             )
 
     if _mentions(lower, ["sync", "refresh", "pull"]) and _mentions(lower, ["google", "gmail", "inbox", "email", "calendar"]):
+        integrations = _integration_statuses(db, account, access.user)
+        not_ready = _provider_sync_not_ready_response(profile, integrations, "google_workspace", account, effective_mode)
+        if not_ready:
+            return _chat_turn_response(db, account, access.user, request.message, **not_ready)
         try:
             sync_result = _sync_google_workspace(db, email_limit=5, calendar_days=14, account=account, user=access.user)
             reply = (
@@ -1945,11 +2145,11 @@ def assistant_chat(
                 suggested_prompts=["Show my synced inbox.", "What meetings need prep?"],
             )
         except HTTPException as exc:
-            verify_first = _verify_before_sync_chat_response(db, account, access.user, request.message, effective_mode, "google_workspace", exc)
+            verify_first = _verify_before_sync_chat_response(db, account, access.user, profile, request.message, effective_mode, "google_workspace", exc)
             if verify_first:
                 return verify_first
             return _chat_turn_response(db, account, access.user, request.message,
-                reply=f"I could not sync Google Workspace yet: {exc.detail}",
+                reply=f"I could not sync Google Workspace yet: {_redact_secret_text(exc.detail)}",
                 intent="sync_google_workspace_unavailable",
                 mode=effective_mode,
                 actions=[],
@@ -1962,13 +2162,13 @@ def assistant_chat(
             account,
             access.user,
             request.message,
-            _connected_context_chat_response(db, profile, account, lower, effective_mode),
+            _connected_context_chat_response(db, profile, account, access.user, lower, effective_mode),
         )
 
     if _pre_connector_help_requested(lower):
         integrations = _integration_statuses(db, account, access.user)
         setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
-        seed_step = _seed_context_step(db, account, profile, effective_mode)
+        seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
         provider = _provider_from_chat(lower)
         provider_phrase = f" before {_provider_display_name(provider)} is connected" if provider else " before the church tools are connected"
         if seed_step:
@@ -1999,25 +2199,63 @@ def assistant_chat(
             provider = _next_setup_provider(profile, integrations)
         if provider:
             status = next((item for item in integrations if item.provider == provider), None)
+            recommendation = _connector_setup_recommendation(profile, provider, integrations)
+            if status and status.status in {"connected", "configured", "available"} and not status.verified_at:
+                check_step = _integration_check_credentials_step(status, profile)
+                reply = (
+                    f"{recommendation} {status.display_name} is {status.status.replace('_', ' ')}, "
+                    "but I still need to check credentials before syncing ministry data."
+                )
+                return _chat_turn_response(db, account, access.user, request.message,
+                    reply=reply,
+                    intent="integration_setup_started",
+                    mode=effective_mode,
+                    actions=[check_step],
+                    suggested_prompts=[f"Check {status.display_name} credentials.", "Open integrations.", "Explain the approval rules."],
+                )
+            if status and status.status in {"connected", "configured", "available"} and status.verified_at:
+                reply = (
+                    f"{recommendation} {status.display_name} is already {status.status.replace('_', ' ')} and checked. "
+                    "Ask me to sync it when you want me to pull fresh context."
+                )
+                return _chat_turn_response(db, account, access.user, request.message,
+                    reply=reply,
+                    intent="integration_setup_started",
+                    mode=effective_mode,
+                    actions=[],
+                    suggested_prompts=[f"Sync {status.display_name}.", "Open integrations.", "Explain the approval rules."],
+                )
             setup_result = _prepare_integration_setup_from_chat(db, provider, account, access.user)
             setup = setup_result["setup"]
             action = setup_result.get("action")
-            if status and status.status in {"connected", "configured", "available"} and not status.verified_at:
-                reply = f"{status.display_name} is {status.status.replace('_', ' ')}, but I still need to check credentials before syncing ministry data."
-            elif setup.status in {"connected", "configured", "available"}:
-                reply = f"{setup.display_name} is already {setup.status.replace('_', ' ')} and checked. Ask me to sync it when you want me to pull fresh context."
+            if setup.status in {"connected", "configured", "available"}:
+                reply = (
+                    f"{recommendation} {setup.display_name} is already {setup.status.replace('_', ' ')} and checked. "
+                    "Ask me to sync it when you want me to pull fresh context."
+                )
             elif setup.authorization_url:
                 reply = (
+                    f"{recommendation} "
                     f"I prepared the secure {setup.display_name} authorization step. "
                     "Open it from the approval queue or Integrations screen; I will not ask you to paste tokens or passwords into chat."
                 )
             elif setup.missing_config:
-                reply = (
-                    f"{setup.display_name} needs server configuration before a pastor can connect it: {', '.join(setup.missing_config)}. "
-                    "I queued the setup note so this stays visible without exposing secrets."
-                )
+                if _api_key_setup_can_accept_workspace_credentials(setup):
+                    reply = (
+                        f"{recommendation} "
+                        f"I queued encrypted workspace credential setup for {setup.display_name}. "
+                        f"Add the church's API key and public HTTPS base URL here, or configure {', '.join(setup.missing_config)} server-side. "
+                        "I will still check credentials before syncing ministry data."
+                    )
+                else:
+                    reply = (
+                        f"{recommendation} "
+                        f"{setup.display_name} needs secure server configuration before a pastor can connect it: {', '.join(setup.missing_config)}. "
+                        "I queued the setup note so this stays visible without exposing secrets."
+                    )
             else:
                 reply = (
+                    f"{recommendation} "
                     f"I queued the {setup.display_name} setup instructions. "
                     "This connector stays read-side until a policy and approval allow writes."
                 )
@@ -2026,7 +2264,7 @@ def assistant_chat(
                 intent="integration_setup_started",
                 mode=effective_mode,
                 actions=[_desk_item_from_action(action)] if action else [],
-                suggested_prompts=[f"Sync {setup.display_name}.", "Show my approvals.", "Explain the approval rules."],
+                suggested_prompts=_integration_setup_chat_prompts(setup),
             )
 
     if _morning_briefing_requested(lower):
@@ -2056,10 +2294,34 @@ def assistant_chat(
             lines = "; ".join(f"{item.title}: {item.action or item.subtitle or item.detail}" for item in actions[:3])
             reply = f"I would start here: {lines}. I am pulling this from the current care, visitor, prayer, and absence data."
         else:
-            seed_step = _seed_context_step(db, account, profile, effective_mode)
+            seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
             if seed_step:
                 return _persist_chat_response(db, account, access.user, request.message, _data_seed_chat_response(seed_step, effective_mode, profile, account))
-            reply = "I do not see an urgent care, visitor, prayer, or absence follow-up in the current data. I would use the next block for protected sermon work or admin cleanup."
+            integrations = _integration_statuses(db, account, access.user)
+            setup_steps = _setup_steps(profile, integrations, needs_seed_context=False)
+            if setup_steps:
+                first = setup_steps[0]
+                return _chat_turn_response(db, account, access.user, request.message,
+                    reply=(
+                        "I do not see an urgent care, visitor, prayer, or absence follow-up in the current data yet. "
+                        f"The next useful step is to {_setup_summary_phrase(first)} so I can work from real ministry context instead of guessing."
+                    ),
+                    intent="prioritize_day",
+                    mode=effective_mode,
+                    actions=setup_steps[:4],
+                    suggested_prompts=_suggested_prompts(profile, priorities, setup_steps),
+                )
+            rhythm = _clean(profile.weekly_rhythm)
+            if rhythm:
+                reply = (
+                    "I do not see an urgent care, visitor, prayer, or absence follow-up in the current data. "
+                    f"Based on the rhythm you saved, I would protect this next: {rhythm}."
+                )
+            else:
+                reply = (
+                    "I do not see an urgent care, visitor, prayer, or absence follow-up in the current data yet. "
+                    "Give me the next real person, visitor, prayer request, or care update and I will keep that follow-up in view."
+                )
         return _chat_turn_response(db, account, access.user, request.message,
             reply=reply,
             intent="prioritize_day",
@@ -2071,24 +2333,44 @@ def assistant_chat(
     if _queue_synced_inbox_replies_requested(lower):
         actions = _prepare_connected_email_replies(db, profile, lower, account, limit=3)
         if actions:
+            connected_email = _connected_items_filtered(
+                db,
+                account=account,
+                provider=_provider_from_chat(lower),
+                item_type="email",
+                limit=3,
+            )
+            integrations = _integration_statuses(db, account, access.user)
+            refresh_state = _connected_items_refresh_state(profile, integrations, connected_email)
             titles = "; ".join(action.title for action in actions[:3])
+            reply = (
+                f"I queued {len(actions)} synced inbox repl{'y' if len(actions) == 1 else 'ies'} for your review: {titles}. "
+                "These are drafts only; I will not send or write externally without approval."
+            )
+            if refresh_state["note"]:
+                reply += f" {refresh_state['note']}"
+            prompts = ["Show my approvals.", "What else is in my inbox?"]
+            if refresh_state["refresh_prompt"]:
+                prompts.append(refresh_state["refresh_prompt"])
             return _chat_turn_response(db, account, access.user, request.message,
-                reply=(
-                    f"I queued {len(actions)} synced inbox repl{'y' if len(actions) == 1 else 'ies'} for your review: {titles}. "
-                    "These are drafts only; I will not send or write externally without approval."
-                ),
+                reply=reply,
                 intent="draft_synced_email_replies_queued",
                 mode=effective_mode,
                 saved=True,
-                actions=[_desk_item_from_action(action) for action in actions],
-                suggested_prompts=["Show my approvals.", "What else is in my inbox?", "Sync the mailbox again."],
+                actions=_dedupe_desk_items(
+                    [_desk_item_from_action(action) for action in actions] + refresh_state["actions"][:1]
+                ),
+                suggested_prompts=prompts,
             )
-        return _chat_turn_response(db, account, access.user, request.message,
-            reply="I do not have synced inbox items to draft from yet. Connect Google Workspace or Microsoft 365, verify it, then sync the inbox.",
+        return _empty_synced_inbox_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            profile,
+            effective_mode,
             intent="draft_synced_email_replies_empty",
-            mode=effective_mode,
-            actions=[],
-            suggested_prompts=["Open integrations.", "Sync the inbox."],
+            drafting=True,
         )
 
     if _mentions(lower, ["draft", "reply", "respond", "replies"]) and _mentions(lower, ["inbox", "message", "gmail", "email", "outlook"]):
@@ -2105,20 +2387,33 @@ def assistant_chat(
     if _mentions(lower, ["inbox", "message", "gmail", "outlook"]) or (_mentions(lower, ["email"]) and not _mentions(lower, ["draft"])):
         connected_email = _connected_items(db, "email", account=account, limit=5)
         if connected_email:
+            integrations = _integration_statuses(db, account, access.user)
+            refresh_state = _connected_items_refresh_state(profile, integrations, connected_email)
             lines = "; ".join(f"{item.title}: {item.snippet or item.subtitle or 'Review'}" for item in connected_email[:3])
+            reply = f"From the synced inbox, I would review these first: {lines}. I queued inbox items for review instead of sending anything."
+            if refresh_state["note"]:
+                reply += f" {refresh_state['note']}"
+            prompts = ["Queue replies for these."]
+            if refresh_state["refresh_prompt"]:
+                prompts.append(refresh_state["refresh_prompt"])
             return _chat_turn_response(db, account, access.user, request.message,
-                reply=f"From the synced inbox, I would review these first: {lines}. I queued inbox items for review instead of sending anything.",
+                reply=reply,
                 intent="synced_inbox",
                 mode=effective_mode,
-                actions=[_desk_item_from_connected_item(item) for item in connected_email],
-                suggested_prompts=["Queue replies for these.", "Sync the mailbox again."],
+                actions=_dedupe_desk_items(
+                    [_desk_item_from_connected_item(item) for item in connected_email] + refresh_state["actions"][:1]
+                ),
+                suggested_prompts=prompts,
             )
-        return _chat_turn_response(db, account, access.user, request.message,
-            reply="I do not have synced inbox items yet. Connect Google Workspace or Microsoft 365, then ask me to sync the inbox; I will queue anything that needs your review.",
+        return _empty_synced_inbox_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            profile,
+            effective_mode,
             intent="synced_inbox_empty",
-            mode=effective_mode,
-            actions=[],
-            suggested_prompts=["Open integrations.", "Sync the inbox."],
+            drafting=False,
         )
 
     if _scheduling_reply_requested(lower):
@@ -2159,16 +2454,16 @@ def assistant_chat(
                 suggested_prompts=["Show my approvals.", "What should I approve first?"],
             )
         else:
-            seed_step = _seed_context_step(db, account, profile, effective_mode)
+            seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
             if seed_step:
                 return _persist_chat_response(db, account, access.user, request.message, _data_seed_chat_response(seed_step, effective_mode, profile, account))
-            reply = "I do not see a visitor, care, or prayer item that needs a draft right now. Once email is connected, I will also watch your ministry inbox."
-            return _chat_turn_response(db, account, access.user, request.message,
-                reply=reply,
-                intent="draft_replies_empty",
-                mode=effective_mode,
-                actions=[],
-                suggested_prompts=["Show me the draft queue.", "What should I approve first?"],
+            return _draft_replies_empty_chat_response(
+                db,
+                account,
+                access.user,
+                request.message,
+                profile,
+                effective_mode,
             )
 
     if _meeting_prep_lookup_requested(lower):
@@ -2177,7 +2472,7 @@ def assistant_chat(
             account,
             access.user,
             request.message,
-            _meeting_prep_lookup_response(db, profile, account, effective_mode),
+            _meeting_prep_lookup_response(db, profile, account, access.user, effective_mode),
         )
 
     if _mentions(lower, ["prepare", "prep", "brief"]) and _mentions(lower, ["meeting", "calendar", "event", "visit"]):
@@ -2190,16 +2485,45 @@ def assistant_chat(
                 actions=[_desk_item_from_action(action)],
                 suggested_prompts=["Show my approvals.", "What meetings are coming up?"],
             )
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _meeting_prep_lookup_response(db, profile, account, access.user, effective_mode),
+        )
 
     if _care_visit_planning_requested(lower):
         visit_plan = _maybe_prepare_care_visit_plan(db, profile, account, request.message, lower, effective_mode)
         if visit_plan:
             return _persist_chat_response(db, account, access.user, request.message, visit_plan)
+        seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _care_visit_needs_context_response(db, profile, account, effective_mode, seed_step),
+        )
+
+    if _person_context_requested(lower):
+        ministry_context = _maybe_answer_ministry_context(db, profile, account, request.message, lower, effective_mode)
+        if ministry_context:
+            return _persist_chat_response(db, account, access.user, request.message, ministry_context)
 
     if _mentions(lower, ["calendar", "schedule", "visit", "block", "meet", "meeting", "time"]):
         visit_plan = _maybe_prepare_care_visit_plan(db, profile, account, request.message, lower, effective_mode)
         if visit_plan:
             return _persist_chat_response(db, account, access.user, request.message, visit_plan)
+        if _care_visit_planning_requested(lower):
+            seed_step = _seed_context_step(db, account, profile, effective_mode, access.user)
+            return _persist_chat_response(
+                db,
+                account,
+                access.user,
+                request.message,
+                _care_visit_needs_context_response(db, profile, account, effective_mode, seed_step),
+            )
         connected_events = _connected_items(db, "calendar_event", account=account, limit=5)
         if connected_events and _mentions(lower, ["calendar", "meeting", "meetings", "events"]):
             lines = "; ".join(f"{item.title}: {item.subtitle or _date_label(item.occurred_at)}" for item in connected_events[:3])
@@ -2240,6 +2564,26 @@ def assistant_chat(
             ),
         )
 
+    if _check_on_next_requested(lower):
+        integrations = _integration_statuses(db, account, access.user)
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+        pending_actions = _pending_assistant_actions(db, account)
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _check_on_next_response(
+                db,
+                profile,
+                priorities,
+                setup_steps,
+                pending_actions,
+                effective_mode,
+                account,
+            ),
+        )
+
     if _next_action_requested(lower):
         integrations = _integration_statuses(db, account, access.user)
         setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
@@ -2261,8 +2605,21 @@ def assistant_chat(
             ),
         )
 
+    if _profile_setting_lookup_requested(lower):
+        integrations = _integration_statuses(db, account, access.user)
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+        return _persist_chat_response(
+            db,
+            account,
+            access.user,
+            request.message,
+            _profile_setting_lookup_response(profile, setup_steps, effective_mode, account, lower),
+        )
+
     if _approval_rules_requested(lower):
         pending_actions = _pending_assistant_actions(db, account)
+        integrations = _integration_statuses(db, account, access.user)
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
         reply = (
             "The approval rule is simple: I can draft, summarize, prepare, and queue work, but I do not send email, create calendar events, "
             "or change an external church system until the connector credentials are checked, the church writeback policy allows that action type, "
@@ -2275,7 +2632,11 @@ def assistant_chat(
             intent="approval_rules",
             mode=effective_mode,
             actions=[_desk_item_from_action(action) for action in pending_actions[:3]],
-            suggested_prompts=["Show my approvals.", "What should I connect first?", "Draft the replies I should review."],
+            suggested_prompts=(
+                ["Show my approvals.", "What should I approve first?", "Explain the approval rules."]
+                if pending_actions
+                else _suggested_prompts(profile, priorities, setup_steps)
+            ),
         )
 
     if _first_week_plan_requested(lower):
@@ -2331,13 +2692,27 @@ def assistant_chat(
                 "I will not send or write anything externally until you approve the exact item."
             )
         else:
-            reply = "There are no pending approval items right now. Ask me to draft replies, prepare meeting context, or prepare today's queue when you want work staged for review."
+            integrations = _integration_statuses(db, account, access.user)
+            setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+            setup_actions = setup_steps[:3]
+            if setup_actions:
+                next_step = setup_actions[0]
+                reply = (
+                    f"There are no pending approval items right now. The next useful step is {next_step.title}: "
+                    f"{next_step.detail or next_step.subtitle or next_step.action}. "
+                    "Once there is a real person, prayer, synced email, or care note to work from, I can stage reviewable drafts or calendar blocks."
+                )
+            else:
+                reply = (
+                    "There are no pending approval items right now. Give me a real visitor, prayer request, synced email, "
+                    "or care note, and I can turn it into a reviewable draft or calendar block without sending anything automatically."
+                )
         return _chat_turn_response(db, account, access.user, request.message,
             reply=reply,
             intent="approval_queue_lookup",
             mode=effective_mode,
-            actions=[_desk_item_from_action(action) for action in pending_actions[:5]],
-            suggested_prompts=["Draft the replies I should review.", "Prepare today's queue."],
+            actions=[_desk_item_from_action(action) for action in pending_actions[:5]] if pending_actions else setup_actions,
+            suggested_prompts=_suggested_prompts(profile, priorities, setup_steps if not pending_actions else None),
         )
 
     if approval_prepare:
@@ -2402,6 +2777,34 @@ def assistant_chat(
             profile=_profile_response(profile, account),
         )
 
+    if _ministry_learning_gaps_requested(lower):
+        missing = _profile_response(profile, account).missing_fields
+        if missing:
+            next_question = _interview_question(profile) or next((q for q in ONBOARDING_QUESTIONS if q["id"] == missing[0]), ONBOARDING_QUESTIONS[0])
+            why = next_question.get("why") if isinstance(next_question, dict) else None
+            reply = f"I still need to learn your ministry context. Start here: {next_question['question']}"
+            if why:
+                reply = f"{reply} {why}"
+            return _chat_turn_response(db, account, access.user, request.message,
+                reply=reply,
+                intent="onboarding",
+                mode=effective_mode,
+                actions=[],
+                suggested_prompts=["How will you use this context?", "What should I handle next?"],
+                profile=_profile_response(profile, account),
+            )
+        integrations = _integration_statuses(db, account, access.user)
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+        response = _ministry_learning_gaps_response(profile, setup_steps, priorities, effective_mode, account)
+        return _chat_turn_response(db, account, access.user, request.message,
+            reply=response.reply,
+            intent=response.intent,
+            mode=effective_mode,
+            actions=response.actions,
+            suggested_prompts=response.suggested_prompts,
+            profile=response.profile,
+        )
+
     if _mentions(lower, ["setup", "profile", "context", "learn", "onboard", "about me", "ministry"]):
         missing = _profile_response(profile, account).missing_fields
         if missing:
@@ -2410,27 +2813,45 @@ def assistant_chat(
             reply = f"I still need to learn your ministry context. Start here: {next_question['question']}"
             if why:
                 reply = f"{reply} {why}"
+            actions = []
+            prompts = ["What do you know about my church?", "How will you use this context?", "What should I handle next?"]
         else:
             integrations = _integration_statuses(db, account, access.user)
             setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+            if _ministry_learning_gaps_requested(lower):
+                response = _ministry_learning_gaps_response(profile, setup_steps, priorities, effective_mode, account)
+                return _chat_turn_response(db, account, access.user, request.message,
+                    reply=response.reply,
+                    intent=response.intent,
+                    mode=effective_mode,
+                    actions=response.actions,
+                    suggested_prompts=response.suggested_prompts,
+                    profile=response.profile,
+                )
             plan = _operating_plan(profile, integrations, priorities, email_drafts, calendar_blocks, setup_steps)
             reply = "I have the core ministry profile. " + _ministry_operating_plan_reply(profile, plan)
+            actions = []
+            prompts = ["What do you know about my church?", "How will you use this context?", "What should I handle next?"]
         return _chat_turn_response(db, account, access.user, request.message,
             reply=reply,
             intent="onboarding",
             mode=effective_mode,
-            actions=[],
-            suggested_prompts=["Open the ministry profile.", "What do you know about my church?"],
+            actions=actions,
+            suggested_prompts=prompts,
             profile=_profile_response(profile, account),
         )
 
-    reply = _default_reply(profile, priorities, email_drafts, calendar_blocks)
+    integrations = _integration_statuses(db, account, access.user)
+    setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+    reply = _default_reply(profile, priorities, email_drafts, calendar_blocks, setup_steps)
+    fallback_actions = (priorities[:3] + setup_steps[:2])[:3] if priorities else setup_steps[:3]
     return _chat_turn_response(db, account, access.user, request.message,
         reply=reply,
         intent="general_assistant",
         mode=effective_mode,
-        actions=priorities[:3],
-        suggested_prompts=_suggested_prompts(profile, priorities),
+        actions=fallback_actions,
+        suggested_prompts=_suggested_prompts(profile, priorities, setup_steps),
+        profile=_profile_response(profile, account),
     )
 
 
@@ -2438,6 +2859,9 @@ def _create_account(db: Session, payload: AccountSignupRequest) -> tuple[ChurchA
     church_name = _clean(payload.church_name)
     if not church_name:
         raise HTTPException(status_code=422, detail="Church name is required to create a Marge workspace.")
+    email = _clean_email(payload.email)
+    if not email:
+        raise HTTPException(status_code=422, detail="A valid email is required to create a Marge workspace and recover access later.")
     pastor_name = _clean(payload.pastor_name)
     slug_base = _slugify(church_name)
     slug = _unique_slug(db, slug_base)
@@ -2446,7 +2870,7 @@ def _create_account(db: Session, payload: AccountSignupRequest) -> tuple[ChurchA
         slug=slug,
         church_name=church_name,
         pastor_name=pastor_name,
-        email=_clean(payload.email),
+        email=email,
         token_hash=_token_hash(legacy_account_token),
     )
     db.add(account)
@@ -2455,7 +2879,7 @@ def _create_account(db: Session, payload: AccountSignupRequest) -> tuple[ChurchA
         db,
         account,
         name=pastor_name,
-        email=_clean(payload.email),
+        email=email,
         role="owner",
     )
     profile = AccountPastorProfile(
@@ -2468,6 +2892,7 @@ def _create_account(db: Session, payload: AccountSignupRequest) -> tuple[ChurchA
         faith_tradition=_clean(payload.faith_tradition),
         ministry_priorities=_clean(payload.ministry_priorities),
         followup_pain=_clean(payload.followup_pain),
+        support_preferences=_clean(payload.support_preferences),
         weekly_rhythm=_clean(payload.weekly_rhythm),
         communication_style=_clean(payload.communication_style),
         tools_in_use=_clean(payload.tools_in_use),
@@ -2489,11 +2914,14 @@ def _create_account_user(
     if not account:
         raise HTTPException(status_code=401, detail="A church workspace is required.")
     normalized_role = normalize_role(role, "staff")
+    email_value = _clean_email(email)
+    if not email_value:
+        raise HTTPException(status_code=422, detail="A valid email is required for workspace users.")
     token = f"marge_user_{secrets.token_urlsafe(32)}"
     user = AccountUser(
         account_id=account.id,
         name=_clean(name),
-        email=_clean(email),
+        email=email_value,
         role=normalized_role,
         token_hash=_token_hash(token),
         active=True,
@@ -2631,6 +3059,10 @@ def _account_access_from_token(db: Session, token: Optional[str]) -> AccountAcce
 
 def _require_role(access: AccountAccess, allowed_roles: set[str], action: str) -> None:
     require_role(access, allowed_roles, action)
+
+
+def _require_workspace(access: AccountAccess, action: str) -> None:
+    require_workspace(access, action)
 
 
 def _chat_message_response(row: AssistantChatMessage) -> AssistantChatMessageResponse:
@@ -2834,6 +3266,7 @@ def _profile_response(profile, account: Optional[ChurchAccount] = None) -> Pasto
         faith_tradition=profile.faith_tradition,
         ministry_priorities=profile.ministry_priorities,
         followup_pain=profile.followup_pain,
+        support_preferences=profile.support_preferences,
         weekly_rhythm=profile.weekly_rhythm,
         communication_style=profile.communication_style,
         tools_in_use=profile.tools_in_use,
@@ -2856,6 +3289,7 @@ def _required_profile_fields() -> List[str]:
         "faith_tradition",
         "followup_pain",
         "ministry_priorities",
+        "support_preferences",
         "tools_in_use",
         "communication_style",
         "weekly_rhythm",
@@ -2871,7 +3305,18 @@ def _profile_is_complete(profile: PastorProfile) -> bool:
     return not _missing_profile_fields(profile)
 
 
-def _maybe_save_onboarding_answer(db: Session, profile: PastorProfile, account: Optional[ChurchAccount], message: str, lower: str) -> Optional[dict]:
+def _maybe_save_onboarding_answer(
+    db: Session,
+    profile: PastorProfile,
+    account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
+    message: str,
+    lower: str,
+) -> Optional[dict]:
+    if _connector_verification_requested(lower):
+        return None
+    if _pastoral_reminder_requested(lower) or _pastoral_reminder_lookup_requested(lower):
+        return None
     missing = _missing_profile_fields(profile)
     if not missing:
         return None
@@ -2881,6 +3326,8 @@ def _maybe_save_onboarding_answer(db: Session, profile: PastorProfile, account: 
     if current_field_update:
         updates[current_field] = current_field_update
     if _looks_like_assistant_question_or_command(lower):
+        if lower.strip().endswith("?"):
+            return None
         if current_field not in updates:
             return None
         updates = {current_field: updates[current_field]}
@@ -2911,7 +3358,7 @@ def _maybe_save_onboarding_answer(db: Session, profile: PastorProfile, account: 
         next_question = _interview_question(profile)
         reply = _ministry_memory_reply(profile, changed, next_question=next_question)
     else:
-        prepared_actions = _prepare_profile_ready_actions(db, profile, account)
+        prepared_actions = _prepare_profile_ready_actions(db, profile, account, user)
         reply = _ministry_memory_reply(profile, changed, prepared_action_count=len(prepared_actions))
     prepared_items = [_desk_item_from_action(action) for action in prepared_actions[:5]]
     return {
@@ -2922,7 +3369,18 @@ def _maybe_save_onboarding_answer(db: Session, profile: PastorProfile, account: 
     }
 
 
-def _maybe_save_profile_context(db: Session, profile, account: Optional[ChurchAccount], message: str, lower: str) -> Optional[dict]:
+def _maybe_save_profile_context(
+    db: Session,
+    profile,
+    account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
+    message: str,
+    lower: str,
+) -> Optional[dict]:
+    if _connector_verification_requested(lower):
+        return None
+    if _pastoral_reminder_requested(lower) or _pastoral_reminder_lookup_requested(lower):
+        return None
     if _looks_like_assistant_question_or_command(lower):
         return None
     person_name = _guess_person_name(message)
@@ -2957,7 +3415,7 @@ def _maybe_save_profile_context(db: Session, profile, account: Optional[ChurchAc
         next_question = _interview_question(profile)
         reply = _ministry_memory_reply(profile, changed, next_question=next_question)
     else:
-        prepared_actions = _prepare_profile_ready_actions(db, profile, account)
+        prepared_actions = _prepare_profile_ready_actions(db, profile, account, user)
         reply = _ministry_memory_reply(profile, changed, prepared_action_count=len(prepared_actions))
     prepared_items = [_desk_item_from_action(action) for action in prepared_actions[:5]]
     return {
@@ -3073,6 +3531,9 @@ def _extract_profile_updates(message: str, lower: str) -> dict:
     ])
     if priorities:
         updates["ministry_priorities"] = priorities
+    support_preferences = _extract_support_preferences(message, lower)
+    if support_preferences:
+        updates["support_preferences"] = support_preferences
     guardrails = _extract_guardrails(message)
     if guardrails:
         updates["guardrails"] = guardrails
@@ -3199,6 +3660,8 @@ def _current_field_profile_update(field: str, message: str, lower: str) -> Optio
         priorities = _extract_profile_updates(message, lower).get("ministry_priorities")
         if priorities:
             return priorities
+    if field == "support_preferences":
+        return _extract_support_preferences(message, lower) or _clean(_strip_intro(message))
     return None
 
 
@@ -3228,6 +3691,26 @@ def _extract_guardrails(message: str) -> Optional[str]:
     return f"Do not {without_approval}"
 
 
+def _extract_support_preferences(message: str, lower: str) -> Optional[str]:
+    explicit = _extract_after_patterns(message, [
+        r"(?:support me by|help me by|i work best when|when ministry gets heavy,?\s*i need|when things get heavy,?\s*i need|what helps me most is)\s+([^.;\n]+)",
+        r"(?:marge should support me by|i want marge to support me by|i need marge to support me by)\s+([^.;\n]+)",
+    ])
+    if explicit:
+        return explicit
+    if _mentions(lower, [
+        "nudge me",
+        "remind me",
+        "protect rest",
+        "protect my rest",
+        "surface only",
+        "don't overwhelm me",
+        "do not overwhelm me",
+    ]):
+        return _clean(message.strip(" .,:;"))
+    return None
+
+
 def _extract_pastor_name(message: str) -> Optional[str]:
     explicit = _extract_after_patterns(message, [r"(?:my name is|call me)\s+([^.;\n]+)"])
     if explicit:
@@ -3253,23 +3736,34 @@ def _extract_tools(lower: str) -> Optional[str]:
 
 
 def _extract_known_tools(lower: str) -> Optional[str]:
-    known_tools = [
-        ("planning center", "Planning Center"),
-        ("church center", "Church Center"),
-        ("google workspace", "Google Workspace"),
-        ("gmail", "Gmail"),
-        ("google calendar", "Google Calendar"),
-        ("microsoft 365", "Microsoft 365"),
-        ("outlook", "Outlook"),
-        ("rock rms", "Rock RMS"),
-        ("rock", "Rock RMS"),
-        ("breeze", "Breeze"),
-        ("slack", "Slack"),
-    ]
     found = []
-    for needle, label in known_tools:
-        if needle in lower and label not in found:
+
+    def add(label: str) -> None:
+        if label not in found:
             found.append(label)
+
+    if "planning center" in lower:
+        add("Planning Center")
+    if "church center" in lower:
+        add("Church Center")
+    if any(term in lower for term in ["gmail", "google workspace", "google calendar"]):
+        if "gmail" in lower:
+            add("Gmail/Google Workspace")
+        elif "google calendar" in lower:
+            add("Google Calendar/Google Workspace")
+        else:
+            add("Google Workspace")
+    if any(term in lower for term in ["outlook", "microsoft 365", "office 365"]):
+        if "outlook" in lower:
+            add("Outlook/Microsoft 365")
+        else:
+            add("Microsoft 365")
+    if "rock rms" in lower or re.search(r"\brock\b", lower):
+        add("Rock RMS")
+    if "breeze" in lower:
+        add("Breeze")
+    if "slack" in lower:
+        add("Slack")
     return ", ".join(found) if found else None
 
 
@@ -3376,6 +3870,7 @@ def _profile_field_label(field: str) -> str:
         "faith_tradition": "church voice",
         "ministry_priorities": "ministry priorities",
         "followup_pain": "follow-up burden",
+        "support_preferences": "support preferences",
         "tools_in_use": "tools in use",
         "communication_style": "drafting voice",
         "weekly_rhythm": "weekly rhythm",
@@ -3409,11 +3904,11 @@ def _ministry_operating_plan_reply(profile, plan: List[dict]) -> str:
     if not plan:
         return (
             "I do not know enough yet. Start by telling me your church context, tools, follow-up burden, "
-            "drafting voice, weekly rhythm, and guardrails."
+            "support preferences, drafting voice, weekly rhythm, and guardrails."
         )
     lead = _ministry_memory_summary(profile)
     steps = []
-    for item in plan[:6]:
+    for item in plan[:8]:
         title = item.get("title") or "Next step"
         detail = item.get("detail") or item.get("action") or "Keep this in view."
         action = item.get("action")
@@ -3441,9 +3936,21 @@ def _ministry_memory_summary(profile) -> str:
     priorities = _short_context(profile.ministry_priorities)
     if priorities:
         sentences.append(f"The first ministry priority I should help move is: {priorities}.")
+    support = _short_context(profile.support_preferences)
+    if support:
+        sentences.append(f"The way I should support this pastor personally is: {support}.")
     tools = _short_context(profile.tools_in_use)
     if tools:
         sentences.append(f"The systems already in the room are: {tools}.")
+    voice = _short_context(profile.communication_style)
+    if voice:
+        sentences.append(f"The drafting voice I should use is: {voice}.")
+    rhythm = _short_context(profile.weekly_rhythm)
+    if rhythm:
+        sentences.append(f"The weekly rhythm I should protect is: {rhythm}.")
+    guardrails = _short_context(profile.guardrails)
+    if guardrails:
+        sentences.append(f"The approval boundaries I should keep are: {guardrails}.")
     return " ".join(sentences) or "That gives me one more piece of the ministry picture."
 
 
@@ -3453,6 +3960,8 @@ def _ministry_memory_implications(profile) -> str:
         uses.append("keep that follow-up burden visible")
     if _clean(profile.ministry_priorities):
         uses.append("aim setup and drafts at the priority you named")
+    if _clean(profile.support_preferences):
+        uses.append("support you in the way you named")
     if _clean(profile.faith_tradition):
         uses.append("respect your church's language and tradition")
     if _clean(profile.tools_in_use):
@@ -3511,6 +4020,7 @@ def _maybe_save_pastoral_update(
     db: Session,
     profile,
     account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
     message: str,
     lower: str,
     effective_mode: Literal["demo", "live"],
@@ -3522,7 +4032,7 @@ def _maybe_save_pastoral_update(
     person_name = _guess_person_name(message)
     if _looks_like_visitor_update(lower):
         if not person_name:
-            return _missing_visitor_name_response(db, account, profile, effective_mode)
+            return _missing_visitor_name_response(db, account, profile, effective_mode, user)
         return _save_visitor_from_chat(db, account, profile, message, person_name)
     if _looks_like_prayer_update(lower):
         return _save_prayer_from_chat(db, account, profile, message, person_name)
@@ -3535,13 +4045,209 @@ def _maybe_save_pastoral_update(
     return None
 
 
+def _pastoral_reminder_requested(lower: str) -> bool:
+    return (
+        bool(re.search(r"\b(?:remind me to|set a reminder to|queue a reminder to|help me remember to|nudge me to)\b", lower))
+        or lower.strip().startswith("reminder:")
+    )
+
+
+def _pastoral_reminder_lookup_requested(lower: str) -> bool:
+    if _pastoral_reminder_requested(lower):
+        return False
+    return _mentions(lower, [
+        "what reminders do i have",
+        "what reminders are pending",
+        "show my reminders",
+        "show reminders",
+        "list reminders",
+        "pending reminders",
+        "local reminders",
+        "pastoral reminders",
+    ])
+
+
+def _pastoral_reminder_lookup_response(
+    db: Session,
+    profile,
+    account: Optional[ChurchAccount],
+    effective_mode: Literal["demo", "live"],
+) -> AssistantChatResponse:
+    reminders = (
+        scoped_query(db.query(AssistantAction), AssistantAction, account)
+        .filter(AssistantAction.action_type == "pastoral_reminder", AssistantAction.status.in_(["pending", "approved"]))
+        .order_by(AssistantAction.updated_at.desc().nullslast(), AssistantAction.created_at.desc())
+        .limit(8)
+        .all()
+    )
+    if reminders:
+        lines = "; ".join(_pastoral_reminder_line(action) for action in reminders[:4])
+        reply = (
+            f"You have {len(reminders)} local pastoral reminder{'s' if len(reminders) != 1 else ''}: {lines}. "
+            "These are local Marge memory only; nothing has been sent, synced, or written externally."
+        )
+        actions = [_desk_item_from_action(action) for action in reminders[:5]]
+        prompts = ["Who should I check on next?", "Show my approvals.", "What can wait until next week?"]
+    else:
+        reply = (
+            "I do not see any pending local pastoral reminders right now. "
+            "Tell me who to check on and when, and I will keep it local until you mark it done."
+        )
+        actions = []
+        prompts = ["Who should I check on next?", "Remind me to check on the next care case next week.", "What should I handle next?"]
+    return AssistantChatResponse(
+        reply=reply,
+        intent="pastoral_reminder_lookup",
+        mode=effective_mode,
+        actions=actions,
+        suggested_prompts=prompts,
+        profile=_profile_response(profile, account),
+    )
+
+
+def _pastoral_reminder_line(action: AssistantAction) -> str:
+    payload = _json_loads(action.payload_json)
+    reminder = payload.get("reminder") or {}
+    task = _clean(reminder.get("task")) or action.title or "Pastoral reminder"
+    due = _clean(reminder.get("due"))
+    return f"{task}{f' ({due})' if due else ''}"
+
+
+def _pastoral_reminder_description(
+    db: Session,
+    account: Optional[ChurchAccount],
+    action: AssistantAction,
+    reminder: dict,
+) -> str:
+    task = _clean(reminder.get("task")) or action.title or "Pastoral reminder"
+    due_label = _clean(reminder.get("due"))
+    person_name = _clean(reminder.get("person_name"))
+    member_id = reminder.get("member_id") or (action.related_id if action.related_type == "member" else None)
+    member = None
+    if member_id:
+        member = scoped_query(db.query(Member), Member, account).filter(Member.id == member_id).first()
+    description_parts = [task]
+    if due_label:
+        description_parts.append(f"Timing: {due_label}.")
+    if member:
+        description_parts.append(f"Linked to {member.full_name} in Marge's people memory.")
+    elif person_name:
+        description_parts.append(f"Person named: {person_name}. Add them to Marge before drafting or logging sensitive follow-up.")
+    description_parts.append("Local reminder only; nothing was sent, synced, or written to an external system.")
+    return " ".join(description_parts)
+
+
+def _pastoral_reminder_chat_response(
+    db: Session,
+    profile,
+    account: Optional[ChurchAccount],
+    message: str,
+    lower: str,
+    effective_mode: Literal["demo", "live"],
+) -> AssistantChatResponse:
+    person_name = _guess_person_name(message)
+    member = _find_member_by_name(db, account, person_name) if person_name else None
+    task = _reminder_task_from_message(message) or _short_context(message, 180) or "Follow up on this pastoral reminder"
+    due_label = _reminder_due_label(lower)
+    title = f"Reminder: {task[:80].rstrip('.')}"
+    description_parts = [task]
+    if due_label:
+        description_parts.append(f"Timing: {due_label}.")
+    if member:
+        description_parts.append(f"Linked to {member.full_name} in Marge's people memory.")
+    elif person_name:
+        description_parts.append(f"Person named: {person_name}. Add them to Marge before drafting or logging sensitive follow-up.")
+    description_parts.append("Local reminder only; nothing was sent, synced, or written to an external system.")
+    action = _upsert_prepared_action(
+        db,
+        dedupe_key=f"pastoral_reminder:{_slugify(task[:120])}",
+        action_type="pastoral_reminder",
+        title=title,
+        description=" ".join(description_parts),
+        payload={
+            "reminder": {
+                "task": task,
+                "person_name": person_name,
+                "member_id": member.id if member else None,
+                "due": due_label,
+                "source_message": message,
+            },
+            "guardrail": "This is local Marge memory. External messages, calendar writes, and connector syncs still require explicit approval.",
+        },
+        source="assistant_chat",
+        external_provider=None,
+        related_type="member" if member else None,
+        related_id=member.id if member else None,
+        privacy_level="pastoral",
+        account=account,
+    )
+    db.flush()
+    _audit(
+        db,
+        "assistant_action.pastoral_reminder_queued",
+        f"Queued pastoral reminder: {task[:120]}",
+        account=account,
+        action_id=action.id,
+        payload={"has_person": bool(person_name), "linked_member": bool(member), "due": due_label},
+    )
+    db.commit()
+    db.refresh(action)
+    if member:
+        lead = f"I queued that local reminder and linked it to {member.full_name}: {task}."
+    elif person_name:
+        lead = f"I queued that local reminder for {person_name}: {task}."
+    else:
+        lead = f"I queued that local pastoral reminder: {task}."
+    timing = f" I marked the timing as {due_label}." if due_label else ""
+    reply = f"{lead}{timing} Nothing was sent, synced, or written to an external system."
+    prompts = ["Show my approvals.", "What should I handle next?"]
+    if person_name:
+        prompts.insert(0, f"What do you know about {person_name}?")
+    return AssistantChatResponse(
+        reply=reply,
+        intent="pastoral_reminder_queued",
+        mode=effective_mode,
+        saved=True,
+        actions=[_desk_item_from_action(action)],
+        suggested_prompts=prompts[:3],
+        profile=_profile_response(profile, account),
+    )
+
+
+def _reminder_task_from_message(message: str) -> str:
+    task = re.sub(
+        r"(?is)^\s*(?:please\s+)?(?:can you\s+)?(?:remind me to|set a reminder to|queue a reminder to|help me remember to|nudge me to|reminder:)\s+",
+        "",
+        message,
+    ).strip(" .")
+    return task
+
+
+def _reminder_due_label(lower: str) -> Optional[str]:
+    if "tomorrow" in lower:
+        return "tomorrow"
+    if "today" in lower:
+        return "today"
+    if _mentions(lower, ["in two weeks", "two weeks", "2 weeks"]):
+        return "in two weeks"
+    if "next week" in lower:
+        return "next week"
+    if "later this week" in lower:
+        return "later this week"
+    for weekday in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+        if weekday in lower:
+            return weekday.title()
+    return None
+
+
 def _missing_visitor_name_response(
     db: Session,
     account: Optional[ChurchAccount],
     profile,
     effective_mode: Literal["demo", "live"],
+    user: Optional[AccountUser] = None,
 ) -> dict:
-    seed_step = _seed_context_step(db, account, profile, effective_mode)
+    seed_step = _seed_context_step(db, account, profile, effective_mode, user)
     actions = [seed_step] if seed_step and seed_step.form == "visitor" else []
     prompts = _data_seed_suggested_prompts(seed_step) if seed_step and seed_step.form == "visitor" else [
         "Log the visitor: name, email, and what they asked about.",
@@ -3550,7 +4256,7 @@ def _missing_visitor_name_response(
     return {
         "reply": (
             "I can log that visitor, but I need at least a name so I do not create a made-up person. "
-            "Tell me something like: Log the visitor: Naomi Grace came Sunday and asked about small groups."
+            "Tell me the visitor's real name, when they came, and what follow-up would help."
         ),
         "intent": "visitor_missing_name",
         "saved": False,
@@ -3841,6 +4547,7 @@ def _prepare_scheduling_reply_action(
             "draft_kind": "scheduling",
             "draft_context": {
                 "weekly_rhythm": profile.weekly_rhythm,
+                "support_preferences": profile.support_preferences,
                 "communication_style": profile.communication_style,
                 "guardrail": profile.guardrails or DEFAULT_GUARDRAILS,
                 "calendar_block": block.model_dump(mode="json") if block else None,
@@ -4060,15 +4767,15 @@ def _prepare_single_followup_draft_action(
         action_type="email_draft",
         title=f"Review {item.title} follow-up",
         description=f"{item.subtitle or 'Pastoral follow-up'}: {item.detail or item.action or 'Draft reply for review.'}",
-        payload={
-            "desk_item": item.model_dump(mode="json"),
-            "email": email_payload,
-            "draft_kind": _prepared_email_kind(item),
-            "draft_context": _profile_draft_context(profile),
-        },
-        source=item.source or "assistant_chat",
-        external_provider=None,
-        related_type=item.source,
+            payload={
+                "desk_item": item.model_dump(mode="json"),
+                "email": email_payload,
+                "draft_kind": _prepared_email_kind(item),
+                "draft_context": _draft_context_for_item(db, profile, account, item),
+            },
+            source=item.source or "assistant_chat",
+            external_provider=None,
+            related_type=item.source,
         related_id=item.related_id,
         privacy_level="private" if item.source == "prayer" else "pastoral",
         account=account,
@@ -4097,6 +4804,22 @@ def _person_context_requested(lower: str) -> bool:
         "show me context for",
         "pastoral context for",
         "member context for",
+        "what should i know before",
+        "what should i remember before",
+        "what do i need to know before",
+        "before i meet with",
+        "before meeting with",
+        "before my meeting with",
+        "before i visit",
+        "before visiting",
+        "when did i last",
+        "when was my last",
+        "last contact with",
+        "last visit with",
+        "last call with",
+        "last text with",
+        "have i followed up with",
+        "did i follow up with",
     ])
 
 
@@ -4138,6 +4861,7 @@ def _absence_draft_chat_response(
     db: Session,
     profile: PastorProfile,
     account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
     email_drafts: List[DeskItem],
     priorities: List[DeskItem],
     effective_mode: Literal["demo", "live"],
@@ -4147,15 +4871,16 @@ def _absence_draft_chat_response(
         absence_items = [item for item in priorities if item.type == "absence" or item.source == "attendance"]
         absence_drafts = _email_drafts({}, absence_items)
     if not absence_drafts:
+        attendance_state = _attendance_context_empty_state(db, profile, account, user)
         return AssistantChatResponse(
             reply=(
                 "I do not see an absence follow-up item to draft from yet. "
-                "Sync attendance from Rock or another church tool, or add a member with last attendance context first."
+                f"{attendance_state['reply']} Add a member with last-attendance context if you want to start manually."
             ),
             intent="absence_drafts_empty",
             mode=effective_mode,
-            actions=[],
-            suggested_prompts=["Who has been absent?", "Open integrations.", "Sync Rock RMS."],
+            actions=attendance_state["actions"],
+            suggested_prompts=attendance_state["prompts"],
             profile=_profile_response(profile, account),
         )
 
@@ -4186,10 +4911,12 @@ def _absence_draft_chat_response(
 
 
 def _absence_context_chat_response(
+    db: Session,
     profile: PastorProfile,
     priorities: List[DeskItem],
     effective_mode: Literal["demo", "live"],
     account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
 ) -> AssistantChatResponse:
     absence_items = [item for item in priorities if item.type == "absence" or item.source == "attendance"]
     if absence_items:
@@ -4202,20 +4929,68 @@ def _absence_context_chat_response(
             "I would keep this gentle and reviewable; I can draft check-ins, but I will not contact anyone without your approval."
         )
         prompts = ["Draft absence check-ins.", "Prepare today's queue.", "Show my approvals."]
+        actions = absence_items[:5]
     else:
+        attendance_state = _attendance_context_empty_state(db, profile, account, user)
         reply = (
             "I do not see an absence follow-up item in the current live desk. "
-            "If Rock RMS or another attendance source has that context, connect it, check credentials, and sync attendance before relying on this list."
+            f"{attendance_state['reply']} Until then I will not guess who is missing."
         )
-        prompts = ["Open integrations.", "Sync Rock RMS.", "What can you do before tools are connected?"]
+        prompts = attendance_state["prompts"]
+        actions = attendance_state["actions"]
     return AssistantChatResponse(
         reply=reply,
         intent="absence_context_lookup",
         mode=effective_mode,
-        actions=absence_items[:5],
+        actions=actions,
         suggested_prompts=prompts,
         profile=_profile_response(profile, account),
     )
+
+
+def _attendance_context_empty_state(
+    db: Session,
+    profile: PastorProfile,
+    account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
+) -> dict:
+    integrations = _integration_statuses(db, account, user)
+    status = next((item for item in integrations if item.provider == "rock"), None)
+    if status and status.status in {"connected", "configured", "available"} and status.verified_at:
+        return {
+            "reply": (
+                f"{status.display_name} credentials are checked, so the next safe step is to sync attendance when you want "
+                "current absence context imported for review."
+            ),
+            "actions": [],
+            "prompts": [f"Sync {status.display_name}.", "Open integrations.", "Explain the approval rules."],
+        }
+    if status and status.status in {"connected", "configured", "available"}:
+        step = _integration_check_credentials_step(status, profile)
+        return {
+            "reply": (
+                f"{status.display_name} is {status.status.replace('_', ' ')}, but it needs a no-sync credential check before "
+                "I sync attendance or prepare absence follow-up."
+            ),
+            "actions": [step],
+            "prompts": [f"Check {status.display_name} credentials.", "Open integrations.", "Explain the approval rules."],
+        }
+    step = _provider_setup_or_check_step(
+        profile,
+        integrations,
+        "rock",
+        subtitle="Use Rock RMS when you want Marge to watch attendance and absence follow-up.",
+        detail="Start secure setup first. Marge checks credentials without syncing before any attendance context is imported.",
+    )
+    actions = [step] if step else []
+    return {
+        "reply": (
+            "No attendance source has completed secure setup and a no-sync credential check yet. "
+            "I attached the Rock RMS setup step before any attendance sync."
+        ),
+        "actions": actions,
+        "prompts": _connector_setup_or_check_prompts(actions),
+    }
 
 
 def _connected_context_requested(lower: str) -> bool:
@@ -4291,10 +5066,240 @@ def _ministry_operating_plan_requested(lower: str) -> bool:
     ])
 
 
+def _ministry_learning_gaps_requested(lower: str) -> bool:
+    return _mentions(lower, [
+        "what do you still need to learn",
+        "what else do you need to learn",
+        "what do you need to learn",
+        "what do you not know",
+        "what don't you know",
+        "what context do you still need",
+        "what should i include",
+        "what should i say",
+        "what else should i tell you",
+        "what should i tell you next",
+        "what do you still need from me",
+        "what else do you need from me",
+    ])
+
+
+def _ministry_learning_gaps_response(
+    profile: PastorProfile,
+    setup_steps: List[DeskItem],
+    priorities: List[DeskItem],
+    effective_mode: Literal["demo", "live"],
+    account: Optional[ChurchAccount],
+) -> AssistantChatResponse:
+    seed_step = next((step for step in setup_steps if step.type == "data_seed"), None)
+    integration_steps = [step for step in setup_steps if step.type in {"integration_setup", "integration_check"}]
+    learned = _ministry_memory_summary(profile)
+    lines = ["I have the core ministry profile now.", learned]
+    actions: List[DeskItem] = []
+    prompts: List[str] = []
+
+    if seed_step:
+        lines.append(
+            f"What I still need next is one real ministry record: {seed_step.title}. "
+            f"{_data_seed_chat_reply(seed_step)}"
+        )
+        actions.append(seed_step)
+        prompts.extend(_data_seed_suggested_prompts(seed_step))
+    elif priorities:
+        priority_lines = "; ".join(
+            f"{item.title}: {item.action or item.detail or item.subtitle or 'review this next'}"
+            for item in priorities[:3]
+        )
+        lines.append(
+            f"From here, I will learn from the real people and review items already in front of us: {priority_lines}. "
+            "I will keep those local until you approve an exact draft or writeback."
+        )
+        actions.extend(priorities[:3])
+        prompts.extend(["What should I handle next?", "Who should I check on next?", "Show my reminders."])
+    else:
+        lines.append(
+            "What I do not have yet is live ministry texture: a first real visitor, care case, prayer request, member preference, "
+            "or synced inbox/calendar/ChMS context. Give me one real update and I will tie it to people, drafts, reminders, or setup without inventing anything."
+        )
+        prompts.extend(["Help me add a ministry update.", "What should I record first?", "What should I connect first?"])
+
+    if integration_steps:
+        connector_names = _human_join([step.title for step in integration_steps[:3]])
+        lines.append(
+            f"I also still need credential-checked tool context from {connector_names}. "
+            "The safe order is setup, no-sync credential check, then sync only when you ask."
+        )
+        actions.extend(integration_steps[: max(0, 3 - len(actions))])
+        prompts.extend(_connector_setup_or_check_prompts(integration_steps[:2]))
+
+    actions = _dedupe_desk_items(actions)[:3]
+    if not prompts:
+        prompts = _suggested_prompts(profile, priorities, setup_steps)
+    return AssistantChatResponse(
+        reply=" ".join(lines),
+        intent="ministry_learning_gaps",
+        mode=effective_mode,
+        actions=actions,
+        suggested_prompts=_dedupe_strings(prompts)[:3],
+        profile=_profile_response(profile, account),
+    )
+
+
+def _profile_setting_lookup_requested(lower: str) -> bool:
+    if _mentions(lower, [
+        "what are my guardrails",
+        "what guardrails",
+        "my guardrails",
+        "my approval boundaries",
+        "what are my approval boundaries",
+        "what should you never do",
+        "what should you not do without asking",
+        "what did i say not to do",
+    ]):
+        return True
+    if _mentions(lower, [
+        "what is my rhythm",
+        "what rhythm",
+        "my weekly rhythm",
+        "what should you protect",
+        "what should marge protect",
+        "what should you remember about my week",
+        "what should you remember about my rhythm",
+        "what should you protect on my calendar",
+    ]):
+        return True
+    if _mentions(lower, [
+        "what tools do you remember",
+        "what tools have i told you",
+        "what systems do you remember",
+        "what systems have i told you",
+        "what tools do we use",
+        "what systems do we use",
+        "what do you know about our tools",
+        "what do you know about my tools",
+    ]):
+        return True
+    return _mentions(lower, [
+        "drafting voice",
+        "communication style",
+        "how should you sound",
+        "how should you write",
+        "how should marge sound",
+        "what voice should you use",
+        "what tone should you use",
+    ])
+
+
+def _profile_setting_lookup_response(
+    profile: PastorProfile,
+    setup_steps: List[DeskItem],
+    effective_mode: Literal["demo", "live"],
+    account: Optional[ChurchAccount],
+    lower: str,
+) -> AssistantChatResponse:
+    actions = setup_steps[:2]
+    if _mentions(lower, ["guardrail", "approval boundaries", "never do", "not do without asking", "not to do"]):
+        saved = _short_context(profile.guardrails)
+        reply = (
+            f"You told me this guardrail: {saved}. "
+            "I will keep that in front of every draft, calendar block, connector sync, and writeback. "
+            "External sends, calendar writes, or church-system changes still require checked credentials, allowed writeback policy, and your approval of the exact item."
+        ) if saved else (
+            "I do not have a custom guardrail saved yet. Until you give one, I will still keep the default boundary: "
+            "I can draft and queue work, but I will not send, schedule, sync, or write externally without checked credentials, allowed policy, and your approval."
+        )
+        prompts = ["Explain the approval rules.", "What else do you need from me?", "Update my guardrails."]
+        intent = "profile_guardrails_lookup"
+    elif _mentions(lower, ["rhythm", "protect", "calendar", "week"]):
+        rhythm = _short_context(profile.weekly_rhythm)
+        reply = (
+            f"You told me to protect this weekly rhythm: {rhythm}. "
+            "I will use that when suggesting visit blocks, meeting prep, scheduling replies, and what can wait. "
+            "I still will not create or change an external calendar event without checked credentials, allowed writeback policy, and your approval."
+        ) if rhythm else (
+            "I do not have a weekly rhythm saved yet. Tell me what to protect, such as sermon prep, visit days, staff meetings, office hours, or rest."
+        )
+        prompts = ["Where can I fit care follow-up?", "What can wait until next week?", "Update my weekly rhythm."]
+        intent = "profile_weekly_rhythm_lookup"
+    elif _mentions(lower, ["tools", "systems"]):
+        tools = _short_context(profile.tools_in_use)
+        connector_steps = [step for step in setup_steps if step.type in {"integration_setup", "integration_check"}]
+        connector_text = ""
+        if connector_steps:
+            connector_text = (
+                " The next safe connector step is "
+                + _human_join([step.title for step in connector_steps[:2]])
+                + ": setup, no-sync credential check, then sync only when you ask."
+            )
+            actions = connector_steps[:2]
+        reply = (
+            f"You told me these church tools are already in the room: {tools}.{connector_text} "
+            "I will not ask for passwords in chat, and I will not import ministry data until credentials are checked and you ask me to sync."
+        ) if tools else (
+            "I do not have your church tools saved yet. Tell me whether you use Planning Center, Rock RMS, Breeze, Google Workspace, Microsoft 365, or another system."
+        )
+        prompts = (_connector_setup_or_check_prompts(connector_steps[:2]) if connector_steps else ["What should I connect first?", "How do secure connections work?", "Open integrations."])
+        intent = "profile_tools_lookup"
+    else:
+        voice = _short_context(profile.communication_style)
+        tradition = _short_context(profile.faith_tradition)
+        reply = (
+            f"You told me to draft in this voice: {voice}. "
+            f"I should also respect this church voice and tradition: {tradition}. "
+            "I will keep those as review metadata for drafts and let you approve the exact wording before anything is sent."
+        ) if voice else (
+            "I do not have a drafting voice saved yet. Tell me whether Marge should sound warm and brief, formal, conversational, or another way."
+        )
+        prompts = ["Update my drafting voice.", "Draft a care follow-up.", "Explain the approval rules."]
+        intent = "profile_drafting_voice_lookup"
+    return AssistantChatResponse(
+        reply=reply,
+        intent=intent,
+        mode=effective_mode,
+        actions=actions,
+        suggested_prompts=prompts,
+        profile=_profile_response(profile, account),
+    )
+
+
+def _pastor_pressure_requested(lower: str) -> bool:
+    if _mentions(lower, [
+        "overwhelmed",
+        "overloaded",
+        "swamped",
+        "buried",
+        "too much",
+        "stressed",
+        "exhausted",
+        "i'm tired",
+        "i am tired",
+        "i feel tired",
+        "so tired",
+        "really tired",
+        "burned out",
+        "burnt out",
+        "discouraged",
+        "ministry is heavy",
+        "heavy today",
+        "hard day",
+        "rough day",
+        "drowning",
+        "take off my plate",
+        "off my plate",
+        "what can you carry",
+        "what can you handle for me",
+        "what can you take",
+        "help me triage",
+        "help me prioritize",
+    ]):
+        return True
+    return _mentions(lower, ["help me"]) and _mentions(lower, ["rest", "carry", "pressure", "heavy"])
+
+
 def _connected_context_chat_response(
     db: Session,
     profile: PastorProfile,
     account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
     lower: str,
     effective_mode: Literal["demo", "live"],
 ) -> AssistantChatResponse:
@@ -4304,24 +5309,28 @@ def _connected_context_chat_response(
     label = _connected_context_label(provider, item_type)
     if items:
         lines = "; ".join(_connected_context_line(item) for item in items[:4])
+        integrations = _integration_statuses(db, account, user)
+        refresh_state = _connected_context_refresh_state(profile, integrations, provider)
         reply = (
             f"Here is the {label} I have synced for review: {lines}. "
             "I am keeping this read-side until you approve a review item or ask me to turn it into local Marge memory."
         )
-        prompts = _connected_context_prompts(items, provider)
+        if refresh_state["note"]:
+            reply += f" {refresh_state['note']}"
+        prompts = _connected_context_prompts(items, refresh_state["refresh_prompt"])
+        actions = [_desk_item_from_connected_item(item) for item in items[:5]]
+        if refresh_state["actions"]:
+            actions = actions[:4] + refresh_state["actions"][:1]
     else:
-        provider_hint = f" from {_provider_display_name(provider)}" if provider else ""
-        type_hint = f" {item_type.replace('_', ' ')}" if item_type else ""
-        reply = (
-            f"I do not have synced{type_hint} context{provider_hint} yet. "
-            "Connect and verify the tool first, then ask me to sync it; I will queue anything sensitive for pastor review."
-        )
-        prompts = ["Open integrations.", "Sync the connected tools.", "What can you do before tools are connected?"]
+        empty_state = _connected_context_empty_state(db, profile, account, user, provider, item_type)
+        reply = empty_state["reply"]
+        prompts = empty_state["prompts"]
+        actions = empty_state["actions"]
     return AssistantChatResponse(
         reply=reply,
         intent="connected_context_lookup",
         mode=effective_mode,
-        actions=[_desk_item_from_connected_item(item) for item in items[:5]],
+        actions=actions,
         suggested_prompts=prompts,
         profile=_profile_response(profile, account),
     )
@@ -4354,7 +5363,7 @@ def _connected_items_filtered(
 
 
 def _connected_context_label(provider: Optional[str], item_type: Optional[str]) -> str:
-    provider_label = _provider_display_name(provider) if provider else "connected-tool"
+    provider_label = _provider_display_name(provider) if provider else "connected tool"
     if item_type == "person":
         return f"{provider_label} people"
     if item_type == "email":
@@ -4382,7 +5391,7 @@ def _connected_context_line(item: ConnectedContextItem) -> str:
     return f"{item.title} ({_provider_display_name(item.provider)} {type_label}{review}): {_short_context(detail, 100) or 'no preview synced'}"
 
 
-def _connected_context_prompts(items: List[ConnectedContextItem], provider: Optional[str]) -> List[str]:
+def _connected_context_prompts(items: List[ConnectedContextItem], refresh_prompt: Optional[str] = None) -> List[str]:
     prompts = ["Show my approvals."]
     if any(item.item_type == "person" for item in items):
         first_person = next((item for item in items if item.item_type == "person"), None)
@@ -4391,15 +5400,163 @@ def _connected_context_prompts(items: List[ConnectedContextItem], provider: Opti
         prompts.append("Draft replies from synced inbox.")
     if any(item.item_type == "calendar_event" for item in items):
         prompts.append("What events need prep?")
-    if provider:
-        prompts.append(f"Sync {_provider_display_name(provider)} again.")
+    if refresh_prompt:
+        prompts.append(refresh_prompt)
     return prompts[:4]
+
+
+def _connected_context_refresh_state(
+    profile: PastorProfile,
+    integrations: List[IntegrationStatus],
+    provider: Optional[str],
+) -> dict:
+    if not provider:
+        return {"note": "", "actions": [], "refresh_prompt": None}
+    status = next((item for item in integrations if item.provider == provider), None)
+    if status and status.status in {"connected", "configured", "available"} and status.verified_at:
+        return {"note": "", "actions": [], "refresh_prompt": f"Sync {status.display_name} again."}
+    if status and status.status in {"connected", "configured", "available"}:
+        step = _integration_check_credentials_step(status, profile)
+        return {
+            "note": (
+                f"{status.display_name} needs a no-sync credential check before I refresh this synced context."
+            ),
+            "actions": [step],
+            "refresh_prompt": f"Check {status.display_name} credentials.",
+        }
+    step = _provider_setup_or_check_step(
+        profile,
+        integrations,
+        provider,
+        subtitle=f"Reconnect {_provider_display_name(provider)} before refreshing synced ministry context.",
+        detail="Marge can show existing review context, but secure setup and a no-sync credential check are required before any refresh.",
+    )
+    actions = [step] if step else []
+    fallback_prompts = _connector_setup_or_check_prompts(actions)
+    return {
+        "note": (
+            f"{_provider_display_name(provider)} must complete secure setup and a no-sync credential check before I refresh this synced context."
+        ),
+        "actions": actions,
+        "refresh_prompt": fallback_prompts[0] if fallback_prompts else "Open integrations.",
+    }
+
+
+def _connected_refresh_state_for_providers(
+    profile: PastorProfile,
+    integrations: List[IntegrationStatus],
+    providers: List[Optional[str]],
+) -> dict:
+    ordered: List[str] = []
+    for provider in providers:
+        if provider and provider not in ordered:
+            ordered.append(provider)
+    if not ordered:
+        return {"note": "", "actions": [], "refresh_prompt": None}
+    states = [_connected_context_refresh_state(profile, integrations, provider) for provider in ordered]
+    blocked_state = next(
+        (
+            state
+            for state in states
+            if not (isinstance(state.get("refresh_prompt"), str) and state["refresh_prompt"].startswith("Sync "))
+        ),
+        None,
+    )
+    verified_state = next(
+        (
+            state
+            for state in states
+            if isinstance(state.get("refresh_prompt"), str) and state["refresh_prompt"].startswith("Sync ")
+        ),
+        None,
+    )
+    if verified_state:
+        if blocked_state and blocked_state.get("note"):
+            return {
+                "note": blocked_state.get("note", ""),
+                "actions": blocked_state.get("actions", []),
+                "refresh_prompt": verified_state.get("refresh_prompt"),
+            }
+        return verified_state
+    return blocked_state or states[0]
+
+
+def _connected_items_refresh_state(
+    profile: PastorProfile,
+    integrations: List[IntegrationStatus],
+    items: List[ConnectedContextItem],
+) -> dict:
+    return _connected_refresh_state_for_providers(profile, integrations, [item.provider for item in items])
+
+
+def _connected_context_empty_state(
+    db: Session,
+    profile: PastorProfile,
+    account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
+    provider: Optional[str],
+    item_type: Optional[str],
+) -> dict:
+    integrations = _integration_statuses(db, account, user)
+    status = next((item for item in integrations if item.provider == provider), None) if provider else None
+    actions = _connected_context_setup_actions(profile, integrations, provider)
+    provider_hint = f" from {_provider_display_name(provider)}" if provider else ""
+    type_hint = f" {item_type.replace('_', ' ')}" if item_type else ""
+    ready = status and status.status in {"connected", "configured", "available"}
+    if ready and status.verified_at:
+        reply = (
+            f"I do not have synced{type_hint} context{provider_hint} yet. "
+            f"{status.display_name} credentials are checked, so the next safe step is to sync when you want me to import current ministry context for review."
+        )
+        prompts = [f"Sync {status.display_name}.", "Open integrations.", "Explain the approval rules."]
+    elif ready:
+        reply = (
+            f"I do not have synced{type_hint} context{provider_hint} yet. "
+            f"{status.display_name} is {status.status.replace('_', ' ')}, but I need to check credentials before syncing ministry data. "
+            "The check confirms access without importing people, email, calendar, or attendance context."
+        )
+        prompts = [f"Check {status.display_name} credentials.", "Open integrations.", "Explain the approval rules."]
+    else:
+        if provider:
+            subject = _provider_display_name(provider)
+            setup_phrase = f"{subject} has not completed secure setup and a no-sync credential check"
+        else:
+            subject = "the requested church tool"
+            setup_phrase = "no church tool has completed secure setup and a no-sync credential check"
+        reply = (
+            f"I do not have synced{type_hint} context{provider_hint} yet because {setup_phrase}. "
+            "I attached the next connector step. After setup and credentials pass, ask me to sync and I will queue sensitive items for pastor review."
+        )
+        prompts = _connected_context_setup_prompts(actions, subject)
+    return {"reply": reply, "actions": actions[:3], "prompts": prompts}
+
+
+def _connected_context_setup_actions(
+    profile: PastorProfile,
+    integrations: List[IntegrationStatus],
+    provider: Optional[str],
+) -> List[DeskItem]:
+    if provider:
+        status = next((item for item in integrations if item.provider == provider), None)
+        if status and status.status in {"connected", "configured", "available"} and not status.verified_at:
+            return [_integration_check_credentials_step(status, profile)]
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=False)
+        return [step for step in setup_steps if step.type == "integration_setup" and step.provider == provider][:1]
+    setup_steps = _setup_steps(profile, integrations, needs_seed_context=False)
+    return [step for step in setup_steps if step.type == "integration_setup"][:3]
+
+
+def _connected_context_setup_prompts(actions: List[DeskItem], subject: str) -> List[str]:
+    if actions:
+        return [_setup_prompt(actions[0]), "How do secure connections work?", "Explain the approval rules."]
+    return ["Open integrations.", "What should I connect first?", "How do secure connections work?"]
 
 
 def _maybe_import_connected_person_from_chat(
     db: Session,
     profile: PastorProfile,
     account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
     message: str,
     lower: str,
     effective_mode: Literal["demo", "live"],
@@ -4408,12 +5565,17 @@ def _maybe_import_connected_person_from_chat(
         return None
     action = _find_connected_person_review_action(db, account, message, lower)
     if not action:
+        provider = _provider_from_chat(lower)
+        empty_state = _connected_context_empty_state(db, profile, account, user, provider, "person")
         return {
             "intent": "connected_person_import_not_found",
             "saved": False,
-            "reply": "I do not see a synced person review item that matches that request. Sync Planning Center or Breeze first, then I can add the right person to Marge's local memory.",
-            "actions": [],
-            "suggested_prompts": ["Review synced people.", "Sync Planning Center.", "Sync Breeze."],
+            "reply": (
+                "I do not see a synced person review item that matches that request. "
+                + empty_state["reply"]
+            ),
+            "actions": empty_state["actions"],
+            "suggested_prompts": empty_state["prompts"],
         }
     if action.status == "executed":
         execution = (_json_loads(action.payload_json).get("execution") or {})
@@ -4547,6 +5709,7 @@ def _person_context_chat_response(
         care_cases = _member_active_care_cases(db, account, member)
         prayers = _member_active_prayers(db, account, member)
         notes = _member_recent_notes(db, account, member)
+        calendar_events = _member_connected_calendar_events(db, account, member)
         bits = [f"I know {member.full_name} from your Marge people memory."]
         if member.email or member.phone:
             contact = _human_join([part for part in [member.email, member.phone] if part])
@@ -4557,12 +5720,21 @@ def _person_context_chat_response(
             bits.append("Active care: " + "; ".join(_care_case_summary(case) for case in care_cases[:3]) + ".")
         if prayers:
             bits.append("Prayer: " + "; ".join(_prayer_summary(prayer) for prayer in prayers[:3]) + ".")
-        if notes:
-            bits.append("Recent notes: " + "; ".join(_short_context(note.note_text, 120) for note in notes[:3]) + ".")
-        if not care_cases and not prayers and not notes:
-            bits.append("I do not see active care, prayer, or recent notes yet.")
+        if calendar_events:
+            bits.append("Synced calendar: " + "; ".join(_connected_calendar_event_summary(event) for event in calendar_events[:3]) + ".")
+        preference_notes = [note for note in notes if note.context_tag == "preference"]
+        if preference_notes:
+            bits.append("Preferences to respect: " + "; ".join(_short_context(note.note_text, 120) for note in preference_notes[:3]) + ".")
+        other_notes = [note for note in notes if note.context_tag != "preference"]
+        if other_notes:
+            bits.append("Recent notes: " + "; ".join(_short_context(note.note_text, 120) for note in other_notes[:3]) + ".")
+        if not care_cases and not prayers and not notes and not calendar_events:
+            bits.append("I do not see active care, prayer, recent notes, or synced calendar context yet.")
         bits.append("I will use this as pastor-only context and will not contact them without your approval.")
-        actions = _member_context_actions(member, care_cases, prayers, notes)
+        actions = _dedupe_desk_items(
+            _member_context_actions(member, care_cases, prayers, notes)
+            + [_desk_item_from_connected_item(event) for event in calendar_events[:2]]
+        )
         return AssistantChatResponse(
             reply=" ".join(bits),
             intent="person_context_lookup",
@@ -4846,6 +6018,52 @@ def _member_recent_notes(db: Session, account: Optional[ChurchAccount], member: 
     )
 
 
+def _member_connected_calendar_events(
+    db: Session,
+    account: Optional[ChurchAccount],
+    member: Member,
+    limit: int = 3,
+) -> List[ConnectedContextItem]:
+    events = _connected_items(db, "calendar_event", account=account, limit=50)
+    matched: List[ConnectedContextItem] = []
+    member_name = (member.full_name or "").lower()
+    member_email = (member.email or "").lower()
+    for event in events:
+        payload = _json_loads(event.payload_json).get("calendar_event") or {}
+        participants = _calendar_event_participants(payload)
+        participant_match = any(_member_matches_calendar_participant(member, participant) for participant in participants)
+        haystack = " ".join([
+            event.title or "",
+            event.subtitle or "",
+            event.snippet or "",
+            payload.get("summary") or "",
+            payload.get("subject") or "",
+            payload.get("description") or "",
+            payload.get("location") or "",
+        ]).lower()
+        text_match = bool(member_name and member_name in haystack) or bool(member_email and member_email in haystack)
+        if participant_match or text_match:
+            matched.append(event)
+            if len(matched) >= limit:
+                break
+    return matched
+
+
+def _member_matches_calendar_participant(member: Member, participant: dict) -> bool:
+    email = (participant.get("email") or "").lower()
+    if member.email and email and member.email.lower() == email:
+        return True
+    name = (participant.get("name") or "").lower()
+    return bool(member.full_name and name and member.full_name.lower() == name)
+
+
+def _connected_calendar_event_summary(item: ConnectedContextItem) -> str:
+    payload = _json_loads(item.payload_json).get("calendar_event") or {}
+    title = item.title or payload.get("summary") or payload.get("subject") or "Calendar event"
+    when = item.subtitle or payload.get("when") or _date_label(item.occurred_at)
+    return f"{title} ({when or 'time not listed'})"
+
+
 def _member_context_actions(member: Member, care_cases: List[CareNote], prayers: List[PrayerRequest], notes: List[MemberNote]) -> List[DeskItem]:
     actions = [DeskItem(id=f"member-{member.id}", type="member", title=member.full_name, subtitle="People memory", detail=member.email or member.phone, priority="medium", action="Open person", source="members", related_id=member.id)]
     actions.extend(_care_desk_item(case) for case in care_cases[:2])
@@ -4857,7 +6075,7 @@ def _member_context_actions(member: Member, care_cases: List[CareNote], prayers:
 
 
 def _care_case_summary(case: CareNote) -> str:
-    return f"{_label(_enum_value(case.category))} case, last contact {_date_label(case.last_contact)}, {_short_context(case.description, 100) or 'no description'}"
+    return f"{_label(_enum_value(case.category))} case, last contact {_date_label(case.last_contact)}, {_short_context(case.description, 100) or 'description not attached yet'}"
 
 
 def _prayer_summary(prayer: PrayerRequest) -> str:
@@ -4866,8 +6084,8 @@ def _prayer_summary(prayer: PrayerRequest) -> str:
 
 
 def _care_line(case: CareNote) -> str:
-    name = case.member.full_name if case.member else "Unknown person"
-    return f"{name} ({_label(_enum_value(case.category))}, last contact {_date_label(case.last_contact)}): {_short_context(case.description, 100) or 'no description'}"
+    name = case.member.full_name if case.member else "Name not linked"
+    return f"{name} ({_label(_enum_value(case.category))}, last contact {_date_label(case.last_contact)}): {_short_context(case.description, 100) or 'description not attached yet'}"
 
 
 def _prayer_subject_name(prayer: PrayerRequest) -> Optional[str]:
@@ -5117,11 +6335,46 @@ def _looks_like_care_case(lower: str) -> bool:
 
 
 def _looks_like_contact_update(lower: str) -> bool:
-    return _mentions(lower, ["called", "texted", "visited", "met with", "checked on", "followed up", "prayed with"])
+    return _mentions(lower, [
+        "called",
+        "texted",
+        "visited",
+        "visiting",
+        "met with",
+        "checked on",
+        "checked in on",
+        "checked in with",
+        "followed up",
+        "prayed with",
+        "sat with",
+        "had coffee with",
+        "got back from",
+        "dropped by",
+        "saw ",
+    ])
 
 
 def _looks_like_member_note(lower: str) -> bool:
-    return _mentions(lower, ["job", "health", "family", "marriage", "moving", "anxious", "struggling", "lost", "diagnosed", "needs help", "follow up"])
+    return _mentions(lower, [
+        "remember",
+        "prefers",
+        "preference",
+        "likes",
+        "does not like",
+        "phone calls",
+        "texts",
+        "job",
+        "health",
+        "family",
+        "marriage",
+        "moving",
+        "anxious",
+        "struggling",
+        "lost",
+        "diagnosed",
+        "needs help",
+        "follow up",
+    ])
 
 
 def _save_visitor_from_chat(db: Session, account: Optional[ChurchAccount], profile, message: str, person_name: str) -> dict:
@@ -5256,7 +6509,15 @@ def _save_contact_from_chat(db: Session, account: Optional[ChurchAccount], profi
         db.commit()
         db.refresh(care)
         item = DeskItem(id=f"care-{care.id}", type="care", title=member.full_name, subtitle="Contact logged", detail=message, priority="medium", action="Follow-up timer reset", source="care", related_id=care.id)
-        reply = f"I logged that contact for {member.full_name} and reset the care follow-up timer."
+        reply = (
+            f"I logged that contact for {member.full_name} and reset the care follow-up timer. "
+            "If you want, I can keep the next check-in from slipping by with a local reminder."
+        )
+        prompts = [
+            f"Remind me to check on {member.full_name} next week.",
+            f"What do you know about {member.full_name}?",
+            f"Draft a care follow-up for {member.full_name}.",
+        ]
     else:
         note = MemberNote(account_id=_account_id(account), member_id=member.id, note_text=message, context_tag="followup")
         db.add(note)
@@ -5264,12 +6525,17 @@ def _save_contact_from_chat(db: Session, account: Optional[ChurchAccount], profi
         db.refresh(note)
         item = DeskItem(id=f"note-{note.id}", type="member_note", title=member.full_name, subtitle="Pastoral note", detail=message, priority="low", action="Remember this", source="member_note", related_id=note.id)
         reply = f"I saved that pastoral note for {member.full_name}. There was no active care case, so I kept it in their record."
+        prompts = [
+            f"Remind me to check on {member.full_name} next week.",
+            f"What do you know about {member.full_name}?",
+            f"Draft a care follow-up for {member.full_name}.",
+        ]
     return {
         "intent": "pastoral_contact_logged",
         "saved": True,
         "reply": reply,
         "actions": [item],
-        "suggested_prompts": [f"What do you know about {member.full_name}?", f"Draft a care follow-up for {member.full_name}.", "Who should I check on next?"],
+        "suggested_prompts": prompts,
     }
 
 
@@ -5378,6 +6644,11 @@ def _guess_person_name(message: str) -> Optional[str]:
         "Log",
         "Add",
         "Save",
+        "Remind",
+        "Reminder",
+        "Remember",
+        "Call",
+        "Text",
         "New",
         "First",
         "Real",
@@ -5385,9 +6656,11 @@ def _guess_person_name(message: str) -> Optional[str]:
         "First-Time",
     }
     patterns = [
+        r"(?:remind me to|set a reminder to|queue a reminder to|help me remember to|nudge me to)\s+(?:call|text|visit|follow up with|check on|pray for)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
         r"(?:log|add|save)\s+(?:the\s+)?(?:first\s+real\s+)?(?:visitor|guest|new family|first[- ]time visitor)\s*[:,-]?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
         r"(?:first\s+(?:real\s+)?visitor|first\s+(?:real\s+)?guest)\s*[:,-]?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-        r"(?:called|texted|visited|met with|checked on|followed up with|prayed with|pray for|prayer for)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        r"(?:called|texted|visited|visiting|met with|checked on|checked in on|checked in with|followed up with|prayed with|sat with|had coffee with|dropped by to see|saw|pray for|prayer for)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        r"(?:got back from|just got back from|came back from)\s+(?:visiting|seeing|checking on|checking in with)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
         r"(?:visitor|guest|new family|first[- ]time visitor)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
         r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:is|has|had|asked|needs|came|visited)",
     ]
@@ -5432,6 +6705,8 @@ def _care_category_from_text(lower: str) -> str:
 
 
 def _context_tag_from_text(lower: str) -> str:
+    if _mentions(lower, ["prefers", "preference", "likes", "does not like", "phone calls", "texts"]):
+        return "preference"
     if _mentions(lower, ["grief", "grieving", "death", "died", "loss", "funeral"]):
         return "grief"
     for tag in ["job", "health", "family", "grief", "prayer", "hospital", "financial", "marriage"]:
@@ -5457,6 +6732,17 @@ def _clean(value):
     return value or None
 
 
+def _clean_email(value) -> Optional[str]:
+    cleaned = _clean(value)
+    if not cleaned:
+        return None
+    _, address = parseaddr(cleaned)
+    address = (address or "").strip().lower()
+    if not re.fullmatch(r"[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+", address):
+        return None
+    return address
+
+
 def _profile_pastor_name(profile: PastorProfile) -> str:
     return profile.pastor_name or os.getenv("PASTOR_NAME", "Pastor")
 
@@ -5466,7 +6752,7 @@ def _profile_church_name(profile: PastorProfile) -> str:
 
 
 def _profile_greeting(profile: PastorProfile, briefing: dict) -> str:
-    pastor = _profile_pastor_name(profile)
+    pastor = pastor_display_name(_profile_pastor_name(profile))
     church = _profile_church_name(profile)
     if not _profile_is_complete(profile):
         return f"Good morning, {pastor}. Let's make Marge fit {church}."
@@ -5484,7 +6770,7 @@ def _profile_greeting(profile: PastorProfile, briefing: dict) -> str:
     )
     if not has_people_context:
         return f"Good morning, {pastor}. Let's add the first real people Marge should keep in view for {church}."
-    return briefing.get("greeting") or f"Good morning, {_profile_pastor_name(profile)}."
+    return briefing.get("greeting") or f"Good morning, {pastor}."
 
 
 def _briefing_for_mode(db: Session, profile: PastorProfile, mode: str, account: Optional[ChurchAccount] = None) -> tuple[str, dict]:
@@ -5512,8 +6798,14 @@ def _needs_seed_context(db: Session, account: Optional[ChurchAccount], profile, 
     return bool(_clean(profile.followup_pain) or _clean(profile.church_context))
 
 
-def _seed_context_step(db: Session, account: Optional[ChurchAccount], profile, effective_mode: str) -> Optional[DeskItem]:
-    integrations = _integration_statuses(db, account)
+def _seed_context_step(
+    db: Session,
+    account: Optional[ChurchAccount],
+    profile,
+    effective_mode: str,
+    user: Optional[AccountUser] = None,
+) -> Optional[DeskItem]:
+    integrations = _integration_statuses(db, account, user)
     setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
     return next((step for step in setup_steps if step.type == "data_seed"), None)
 
@@ -5526,7 +6818,7 @@ def _briefing_pastor_name(profile: PastorProfile) -> str:
 def _priority_items(briefing: dict) -> List[DeskItem]:
     items: List[DeskItem] = []
     for care in briefing.get("active_care_cases", []):
-        name = _field(care, "member_name") or "Unknown"
+        name = _field(care, "member_name") or "Name not linked"
         category = _field(care, "category") or "general"
         last_contact = _field(care, "last_contact")
         action = f"Last contact {_date_label(last_contact)}" if last_contact else "No contact logged"
@@ -5545,7 +6837,7 @@ def _priority_items(briefing: dict) -> List[DeskItem]:
         items.append(DeskItem(
             id=f"visitor-{_field(visitor, 'id')}",
             type="visitor",
-            title=_field(visitor, "full_name") or "Visitor",
+            title=_field(visitor, "full_name") or "Visitor name not linked",
             subtitle=f"Visited {_date_label(_field(visitor, 'visit_date'))}",
             detail=_field(visitor, "notes"),
             priority="high",
@@ -5569,7 +6861,7 @@ def _priority_items(briefing: dict) -> List[DeskItem]:
         items.append(DeskItem(
             id=f"absence-{_field(member, 'id')}",
             type="absence",
-            title=_field(member, "full_name") or "Absent member",
+            title=_field(member, "full_name") or "Member name not linked",
             subtitle=f"Last attended {_date_label(_field(member, 'last_attendance'))}",
             detail="Gentle absence check-in",
             priority="medium",
@@ -5711,10 +7003,29 @@ def _pending_assistant_actions(db: Session, account: Optional[ChurchAccount] = N
         scoped_query(db.query(AssistantAction), AssistantAction, account)
         .filter(AssistantAction.status.in_(["pending", "approved"]))
         .order_by(AssistantAction.updated_at.desc().nullslast(), AssistantAction.created_at.desc())
-        .limit(limit)
+        .limit(max(limit * 4, 25))
         .all()
     )
-    return actions
+    return sorted(actions, key=_assistant_action_priority_key)[:limit]
+
+
+def _assistant_action_priority_key(action: AssistantAction) -> tuple:
+    status_priority = 0 if action.status == "approved" else 1
+    type_priority = {
+        "email_draft": 0,
+        "calendar_block": 0,
+        "pastoral_followup": 0,
+        "email_triage": 1,
+        "person_review": 1,
+        "meeting_prep": 1,
+        "data_seed": 2,
+        "integration_setup": 3,
+        "profile_question": 4,
+        "first_week_plan": 5,
+    }.get(action.action_type or "", 3)
+    updated = action.updated_at or action.created_at
+    timestamp = updated.timestamp() if updated else 0
+    return (status_priority, type_priority, -timestamp, action.id or 0)
 
 
 def _desk_stats(briefing: dict, email_drafts: List[DeskItem], calendar_blocks: List[DeskItem]) -> dict:
@@ -5739,8 +7050,9 @@ def _sync_rock_rms(db: Session, account: Optional[ChurchAccount] = None) -> Inte
     synced_at = datetime.utcnow()
     config = _rock_api_config(db, account)
     connection = _get_or_create_connection(db, "rock", "Rock RMS", "env_api_key", account)
-    if not config.get("api_key"):
-        message = "ROCK_HALLMARK_API_KEY is not set; Rock RMS sync is disabled."
+    missing_config = _rock_missing_config(config)
+    if missing_config:
+        message = "Rock RMS sync is disabled until a Rock API key and API base URL are configured."
         connection.status = "needs_configuration"
         connection.config_hint = message
         connection.error_message = message
@@ -5750,7 +7062,7 @@ def _sync_rock_rms(db: Session, account: Optional[ChurchAccount] = None) -> Inte
             "Rock RMS sync skipped because server configuration is missing.",
             provider="rock",
             account=account,
-            payload={"reason": "missing_server_config"},
+            payload={"reason": "missing_server_config", "missing_config": missing_config},
         )
         db.commit()
         return IntegrationSyncResponse(
@@ -5772,7 +7084,7 @@ def _sync_rock_rms(db: Session, account: Optional[ChurchAccount] = None) -> Inte
     )
 
     if not result.get("rock_sync_enabled"):
-        message = result.get("message") or "ROCK_HALLMARK_API_KEY is not set; Rock RMS sync is disabled."
+        message = result.get("message") or "Rock RMS sync is disabled until a Rock API key and API base URL are configured."
         connection.status = "needs_configuration"
         connection.config_hint = message
         connection.error_message = message
@@ -5918,13 +7230,53 @@ def _verify_integration(
     elif provider == "rock":
         identity = _verify_rock(db, account)
     elif provider == "mcp":
-        identity = {"connection": "local_mcp"}
+        identity = {"bridge_available": True}
     else:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"{definition['display_name']} does not have a credential verification check. "
-                "Verification is available for Google Workspace, Microsoft 365, Planning Center, Breeze, Rock RMS, and MCP."
+                "Credential verification is available for Google Workspace, Microsoft 365, Planning Center, Breeze, and Rock RMS. "
+                "MCP is only the local agent bridge."
+            ),
+        )
+    sensitive_keys = _sensitive_identity_keys(identity)
+    if sensitive_keys:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{definition['display_name']} verification returned unsafe identity metadata: {', '.join(sensitive_keys)}.",
+        )
+    sensitive_values = _sensitive_identity_value_paths(identity)
+    if sensitive_values:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{definition['display_name']} verification returned unsafe identity metadata values at: {', '.join(sensitive_values)}.",
+        )
+    if not _identity_has_signal(identity):
+        raise HTTPException(
+            status_code=502,
+            detail=f"{definition['display_name']} verification did not confirm usable non-secret identity or permission metadata.",
+        )
+
+    if provider == "mcp":
+        _audit(
+            db,
+            "integration.bridge_checked",
+            "Checked local MCP agent bridge availability.",
+            provider=provider,
+            account=account,
+            payload={"identity_keys": sorted(identity.keys())[:8]},
+        )
+        db.commit()
+        return IntegrationVerifyResponse(
+            provider=provider,
+            status="bridge_available",
+            verified_at=None,
+            credential_scope=None,
+            identity=identity,
+            message=(
+                "MCP bridge checked for local LLM clients. This is not a church-tool credential check, "
+                "does not prove an external provider is connected, and did not sync ministry data."
             ),
         )
 
@@ -6096,8 +7448,16 @@ def _save_api_key_integration(
     base_url = _clean(payload.base_url)
     if not api_key:
         raise HTTPException(status_code=422, detail="API key is required.")
-    if provider == "breeze" and not base_url:
-        raise HTTPException(status_code=422, detail="Breeze base URL is required.")
+    if provider in {"breeze", "rock"} and not base_url:
+        raise HTTPException(status_code=422, detail=f"{definition['display_name']} base URL is required.")
+    if provider in {"breeze", "rock"} and not _valid_https_base_url(base_url):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{definition['display_name']} base URL must be a full public HTTPS URL without username, "
+                "password, query, or fragment before Marge stores API-key credentials."
+            ),
+        )
     if not encryption_key_is_configured():
         raise HTTPException(status_code=409, detail=f"{ENCRYPTION_KEY_ENV} must be set to a valid Fernet key before saving API-key credentials.")
 
@@ -6156,6 +7516,38 @@ def _save_api_key_integration(
     )
 
 
+def _valid_https_base_url(raw: Optional[str]) -> bool:
+    parsed = urlparse((raw or "").strip())
+    return (
+        parsed.scheme == "https"
+        and bool(parsed.hostname)
+        and not parsed.username
+        and not parsed.password
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and _public_connector_hostname(parsed.hostname)
+    )
+
+
+def _public_connector_hostname(hostname: Optional[str]) -> bool:
+    cleaned = (hostname or "").strip().strip("[]").lower()
+    if not cleaned or cleaned == "localhost" or cleaned.endswith(".localhost") or "." not in cleaned:
+        return False
+    try:
+        address = ipaddress.ip_address(cleaned)
+    except ValueError:
+        return True
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
 def _verify_google_workspace(token: str) -> dict:
     response = requests.get(
         "https://gmail.googleapis.com/gmail/v1/users/me/profile",
@@ -6198,13 +7590,20 @@ def _verify_planning_center(token: str) -> dict:
 
 def _verify_breeze(db: Session, account: Optional[ChurchAccount] = None) -> dict:
     rows = _as_list(_breeze_get("/people/", params={"limit": 1}, db=db, account=account))
-    return {"sample_people_access": bool(rows)}
+    return {"people_access_confirmed": bool(rows)}
 
 
 def _verify_rock(db: Session, account: Optional[ChurchAccount] = None) -> dict:
     config = _rock_api_config(db, account)
-    if not config.get("api_key"):
-        raise HTTPException(status_code=409, detail="Add a workspace Rock API key or set ROCK_HALLMARK_API_KEY server-side before verifying Rock RMS.")
+    missing_config = _rock_missing_config(config)
+    if missing_config:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Add a workspace Rock API key and API base URL, or set ROCK_API_KEY and ROCK_BASE_URL "
+                "server-side before verifying Rock RMS."
+            ),
+        )
     data = rock_sync._get(
         "People",
         params={"$top": 1, "$select": "Id"},
@@ -6213,7 +7612,64 @@ def _verify_rock(db: Session, account: Optional[ChurchAccount] = None) -> dict:
     )
     if data is None:
         raise HTTPException(status_code=502, detail="Rock RMS verification failed.")
-    return {"sample_people_access": True}
+    return {"people_access_confirmed": True}
+
+
+def _sensitive_identity_keys(identity: dict) -> List[str]:
+    found: set[str] = set()
+
+    def inspect_key(path: str, value) -> None:
+        normalized = path.lower().replace("-", "_")
+        if any(term in normalized for term in SENSITIVE_IDENTITY_KEY_TERMS):
+            found.add(path)
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                inspect_key(f"{path}.{nested_key}" if path else str(nested_key), nested_value)
+        elif isinstance(value, list):
+            for index, nested_value in enumerate(value[:20]):
+                if isinstance(nested_value, dict):
+                    inspect_key(f"{path}[{index}]", nested_value)
+
+    for key, value in (identity or {}).items():
+        inspect_key(str(key), value)
+    return sorted(found)
+
+
+def _sensitive_identity_value_paths(identity: dict) -> List[str]:
+    found: set[str] = set()
+
+    def inspect_value(path: str, value) -> None:
+        if isinstance(value, str) and any(pattern.search(value) for pattern in SENSITIVE_IDENTITY_VALUE_PATTERNS):
+            found.add(path)
+        elif isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                inspect_value(f"{path}.{nested_key}" if path else str(nested_key), nested_value)
+        elif isinstance(value, list):
+            for index, nested_value in enumerate(value[:20]):
+                inspect_value(f"{path}[{index}]", nested_value)
+
+    for key, value in (identity or {}).items():
+        inspect_value(str(key), value)
+    return sorted(found)
+
+
+def _identity_has_signal(identity: dict) -> bool:
+    def value_has_signal(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (int, float)):
+            return value > 0
+        if isinstance(value, dict):
+            return any(value_has_signal(nested) for nested in value.values())
+        if isinstance(value, list):
+            return any(value_has_signal(nested) for nested in value[:20])
+        return bool(value)
+
+    return isinstance(identity, dict) and any(value_has_signal(value) for value in identity.values())
 
 
 def _stat_value(stats: dict, key: str) -> int:
@@ -6375,6 +7831,8 @@ def _breeze_config_error(db: Optional[Session] = None, account: Optional[ChurchA
         missing.append("BREEZE_BASE_URL")
     if missing:
         return f"Add {', '.join(missing)} in secure workspace setup or server-side config to enable Breeze sync."
+    if not _valid_https_base_url(config.get("base_url")):
+        return "BREEZE_BASE_URL must be a full public HTTPS base URL without username, password, query, or fragment."
     return None
 
 
@@ -6913,6 +8371,7 @@ def _sync_microsoft_365(
                     "connected_item_id": item.id,
                     "calendar_event": event,
                     "brief": _microsoft_event_prep_text(event),
+                    "review_context": _meeting_review_context_for_event(db, account, event),
                 },
                 source="microsoft_365",
                 external_provider=None,
@@ -7219,6 +8678,7 @@ def _sync_google_workspace(
                     "connected_item_id": item.id,
                     "calendar_event": event,
                     "brief": _connected_meeting_prep_text(profile, item, event),
+                    "review_context": _meeting_review_context_for_event(db, account, event),
                 },
                 source="google_workspace",
                 external_provider=None,
@@ -7516,7 +8976,12 @@ def _policy_payload(policy: IntegrationPolicy) -> dict:
     }
 
 
-def _ensure_external_write_allowed(db: Session, action: AssistantAction, account: Optional[ChurchAccount] = None) -> None:
+def _ensure_external_write_allowed(
+    db: Session,
+    action: AssistantAction,
+    account: Optional[ChurchAccount] = None,
+    user: Optional[AccountUser] = None,
+) -> None:
     provider = action.external_provider
     if not provider:
         return
@@ -7530,6 +8995,44 @@ def _ensure_external_write_allowed(db: Session, action: AssistantAction, account
         raise HTTPException(status_code=403, detail=f"{action.action_type} is not allowed for {provider} writeback.")
     if action.privacy_level == "private" and policy.privacy_mode != "private_allowed":
         raise HTTPException(status_code=403, detail="Private pastoral actions cannot be written to external systems under the current policy.")
+    _require_verified_for_external_write(db, provider, account, user)
+
+
+def _require_verified_for_external_write(
+    db: Session,
+    provider: str,
+    account: Optional[ChurchAccount] = None,
+    user: Optional[AccountUser] = None,
+) -> None:
+    definitions = {item["provider"]: item for item in _integration_definitions()}
+    definition = definitions.get(provider, {"display_name": provider.replace("_", " ").title()})
+    display_name = definition["display_name"]
+    credential = _provider_credential(db, provider, account, user)
+    if credential:
+        if credential.verified_at:
+            return
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Check credentials for {display_name} before writing externally. "
+                "Verification confirms access without creating drafts or calendar events."
+            ),
+        )
+    if user:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{display_name} is not connected for this Marge user. Connect and check credentials before writing externally.",
+        )
+    connection = scoped_query(db.query(IntegrationConnection), IntegrationConnection, account).filter(IntegrationConnection.provider == provider).first()
+    if connection and connection.verified_at:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Check credentials for {display_name} before writing externally. "
+            "Verification confirms access without creating drafts or calendar events."
+        ),
+    )
 
 
 def _gmail_headers(message: dict) -> dict:
@@ -7561,8 +9064,8 @@ def _parse_google_datetime(value: Optional[str]) -> Optional[datetime]:
 
 
 def _email_triage_description(message: dict) -> str:
-    sender = message.get("from") or "Unknown sender"
-    snippet = message.get("snippet") or "No preview available."
+    sender = message.get("from") or "Sender not available"
+    snippet = message.get("snippet") or "No preview was included by the provider."
     return f"{sender}: {snippet}"
 
 
@@ -7644,7 +9147,7 @@ def _prepare_email_draft_actions(
                 "desk_item": item.model_dump(mode="json"),
                 "email": email_payload,
                 "draft_kind": _prepared_email_kind(item),
-                "draft_context": _profile_draft_context(profile),
+                "draft_context": _draft_context_for_item(db, profile, account, item),
             },
             source=item.source or "assistant",
             external_provider=None,
@@ -7676,8 +9179,8 @@ def _prepared_email_payload(db: Session, profile: PastorProfile, item: DeskItem,
     kind = _prepared_email_kind(item)
     body = _prepared_email_body(db, item, kind, pastor, church, account, profile)
     if not body:
-        recipient = recipient_info.get("name") or item.subtitle or "friend"
-        first_name = recipient.split()[0] if recipient else "friend"
+        recipient = recipient_info.get("name") or item.subtitle or "there"
+        first_name = recipient.split()[0] if recipient else "there"
         body = (
             f"Hey {first_name}, I have been thinking about you and wanted to check in. "
             f"How are you doing this week?\n\n- {pastor_display_name(pastor)}"
@@ -7749,9 +9252,99 @@ def _profile_draft_context(profile: PastorProfile) -> dict:
     context = {
         "drafting_voice": _clean(profile.communication_style),
         "faith_tradition": _clean(profile.faith_tradition),
+        "support_preferences": _clean(profile.support_preferences),
         "guardrail": _clean(profile.guardrails),
     }
     return {key: value for key, value in context.items() if value}
+
+
+def _draft_context_for_item(
+    db: Session,
+    profile: PastorProfile,
+    account: Optional[ChurchAccount],
+    item: DeskItem,
+) -> dict:
+    context = _profile_draft_context(profile)
+    member = _member_for_prepared_email_item(db, account, item)
+    if not member:
+        return context
+    return _add_member_review_context(db, account, member, context)
+
+
+def _member_for_prepared_email_item(
+    db: Session,
+    account: Optional[ChurchAccount],
+    item: DeskItem,
+) -> Optional[Member]:
+    if not item.related_id:
+        return None
+    if item.source in {"attendance", "member", "members"}:
+        return scoped_query(db.query(Member), Member, account).filter(Member.id == item.related_id).first()
+    if item.source == "care":
+        care = scoped_query(db.query(CareNote), CareNote, account).filter(CareNote.id == item.related_id).first()
+        return care.member if care and care.member else None
+    if item.source == "prayer":
+        prayer = scoped_query(db.query(PrayerRequest), PrayerRequest, account).filter(PrayerRequest.id == item.related_id).first()
+        return prayer.member if prayer and prayer.member else None
+    return None
+
+
+def _member_preference_notes_for_draft(
+    db: Session,
+    account: Optional[ChurchAccount],
+    member: Member,
+) -> List[MemberNote]:
+    return (
+        scoped_query(db.query(MemberNote), MemberNote, account)
+        .filter(MemberNote.member_id == member.id, MemberNote.context_tag == "preference")
+        .order_by(MemberNote.created_at.desc())
+        .limit(3)
+        .all()
+    )
+
+
+def _add_member_preference_context(
+    db: Session,
+    account: Optional[ChurchAccount],
+    member: Member,
+    context: dict,
+    *,
+    preference_notes: Optional[List[MemberNote]] = None,
+) -> dict:
+    notes = preference_notes if preference_notes is not None else _member_preference_notes_for_draft(db, account, member)
+    if not notes:
+        return context
+    context["member_id"] = member.id
+    context["member_name"] = member.full_name
+    context["member_preferences"] = [
+        {"note_id": note.id, "text": _short_context(note.note_text, 180)}
+        for note in notes
+    ]
+    context["member_preference_guardrail"] = (
+        "Pastor-only review context. Respect these preferences while drafting, "
+        "but do not send sensitive preference details unless the pastor explicitly approves them."
+    )
+    return context
+
+
+def _add_member_review_context(
+    db: Session,
+    account: Optional[ChurchAccount],
+    member: Member,
+    context: dict,
+) -> dict:
+    care_cases = _member_active_care_cases(db, account, member)
+    prayers = _member_active_prayers(db, account, member)
+    if care_cases or prayers:
+        context["member_id"] = member.id
+        context["member_name"] = member.full_name
+        member_context = {"member_id": member.id, "member_name": member.full_name}
+        if care_cases:
+            member_context["active_care"] = [_care_case_summary(case) for case in care_cases[:2]]
+        if prayers:
+            member_context["active_prayer"] = [_prayer_summary(prayer) for prayer in prayers[:2]]
+        context["member_context"] = [member_context]
+    return _add_member_preference_context(db, account, member, context)
 
 
 def _prepared_email_recipient(db: Session, item: DeskItem, account: Optional[ChurchAccount] = None) -> dict:
@@ -7817,6 +9410,7 @@ def _prepare_setup_actions(
                 "missing_profile_fields": _missing_profile_fields(profile),
                 "tools_in_use": profile.tools_in_use,
                 "faith_tradition": profile.faith_tradition,
+                "support_preferences": profile.support_preferences,
             },
             source=step.source or "setup",
             external_provider=None,
@@ -7836,6 +9430,7 @@ def _prepare_setup_actions(
             payload={
                 "plan": _first_week_plan(profile, setup_steps),
                 "followup_pain": profile.followup_pain,
+                "support_preferences": profile.support_preferences,
                 "faith_tradition": profile.faith_tradition,
                 "tools_in_use": profile.tools_in_use,
                 "weekly_rhythm": profile.weekly_rhythm,
@@ -7856,10 +9451,15 @@ def _prepare_setup_actions(
     return prepared
 
 
-def _prepare_profile_ready_actions(db: Session, profile: PastorProfile, account: Optional[ChurchAccount] = None) -> List[AssistantAction]:
+def _prepare_profile_ready_actions(
+    db: Session,
+    profile: PastorProfile,
+    account: Optional[ChurchAccount] = None,
+    user: Optional[AccountUser] = None,
+) -> List[AssistantAction]:
     if not _profile_is_complete(profile):
         return []
-    integrations = _integration_statuses(db, account)
+    integrations = _integration_statuses(db, account, user)
     setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, "live"))
     actions = _prepare_setup_actions(db, profile, setup_steps, account)
     if actions:
@@ -7922,8 +9522,10 @@ def _prepare_integration_setup_from_chat(
 def _integration_setup_step(setup: IntegrationSetupResponse) -> DeskItem:
     if setup.authorization_url:
         action = "Start secure setup"
+    elif _api_key_setup_can_accept_workspace_credentials(setup):
+        action = "Add encrypted credentials"
     elif setup.missing_config:
-        action = "Review server config"
+        action = "Review encrypted storage" if ENCRYPTION_KEY_ENV in setup.missing_config else "Review server config"
     else:
         action = "Open setup"
     return DeskItem(
@@ -7944,16 +9546,107 @@ def _integration_setup_description(setup: IntegrationSetupResponse) -> str:
         return "Open the secure provider authorization URL. Tokens stay encrypted server-side after callback."
     if setup.missing_config:
         if setup.setup_type in {"api_key", "env_api_key"}:
-            return f"Add encrypted workspace credentials here, or configure {', '.join(setup.missing_config)} server-side."
+            if ENCRYPTION_KEY_ENV in setup.missing_config:
+                remaining = [name for name in setup.missing_config if name != ENCRYPTION_KEY_ENV]
+                suffix = f" Other server-side config still missing: {', '.join(remaining)}." if remaining else ""
+                return f"Encrypted credential storage is not ready. Set {ENCRYPTION_KEY_ENV} before adding workspace credentials here.{suffix}"
+            return f"Add encrypted workspace API-key credentials here, or configure {', '.join(setup.missing_config)} server-side."
         return f"Server config needed: {', '.join(setup.missing_config)}."
     return "Review connector setup instructions before syncing external context."
+
+
+def _integration_setup_chat_prompts(setup: IntegrationSetupResponse) -> List[str]:
+    if setup.status in {"connected", "configured", "available"}:
+        return [f"Sync {setup.display_name}.", "Show connected context.", "Explain the approval rules."]
+    return ["Open integrations.", "How do secure connections work?", "Explain the approval rules."]
+
+
+def _api_key_setup_can_accept_workspace_credentials(setup: IntegrationSetupResponse) -> bool:
+    return setup.setup_type in {"api_key", "env_api_key"} and ENCRYPTION_KEY_ENV not in (setup.missing_config or [])
+
+
+def _integration_check_credentials_step(integration: IntegrationStatus, profile: PastorProfile) -> DeskItem:
+    return DeskItem(
+        id=f"setup-integration-verify-{integration.provider}",
+        type="integration_setup",
+        title=f"Check {integration.display_name} credentials",
+        subtitle=f"Marge can see this connector, but has not verified access for {_profile_tools_label(profile)}.",
+        detail="Credential checks confirm access without importing people, email, calendar, or attendance context.",
+        priority="high" if integration.provider in {"google_workspace", "planning_center", "rock", "microsoft_365"} else "medium",
+        action="Check credentials",
+        source="integrations",
+        provider=integration.provider,
+    )
+
+
+def _provider_setup_or_check_step(
+    profile: PastorProfile,
+    integrations: List[IntegrationStatus],
+    provider: str,
+    *,
+    subtitle: Optional[str] = None,
+    detail: Optional[str] = None,
+) -> Optional[DeskItem]:
+    integration = next((item for item in integrations if item.provider == provider), None)
+    if not integration:
+        return None
+    if integration.status in {"connected", "configured", "available"}:
+        if integration.verified_at:
+            return None
+        return _integration_check_credentials_step(integration, profile)
+    return DeskItem(
+        id=f"setup-integration-{provider}",
+        type="integration_setup",
+        title=f"Connect {integration.display_name}",
+        subtitle=subtitle or f"Use {integration.display_name} when this church is ready to connect real ministry context.",
+        detail=detail or integration.config_hint or integration.secure_note,
+        priority="high" if provider in {"google_workspace", "planning_center", "rock", "microsoft_365"} else "medium",
+        action="Start secure setup",
+        source="integrations",
+        provider=provider,
+    )
+
+
+def _connector_setup_or_check_prompts(steps: List[DeskItem]) -> List[str]:
+    if steps:
+        first = steps[0]
+        if first.action == "Check credentials" and first.provider:
+            return [f"Check {_provider_display_name(first.provider)} credentials.", "Open integrations.", "Explain the approval rules."]
+        return [_setup_prompt(first), "How do secure connections work?", "Explain the approval rules."]
+    return ["Open integrations.", "How do secure connections work?", "Explain the approval rules."]
+
+
+def _dedupe_desk_items(items: List[DeskItem]) -> List[DeskItem]:
+    deduped: List[DeskItem] = []
+    seen = set()
+    for item in items:
+        if item.id in seen:
+            continue
+        seen.add(item.id)
+        deduped.append(item)
+    return deduped
+
+
+def _dedupe_strings(items: List[str]) -> List[str]:
+    deduped: List[str] = []
+    seen = set()
+    for item in items:
+        cleaned = _clean(item)
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
 
 
 def _first_week_plan_description(profile: PastorProfile, setup_steps: List[DeskItem]) -> str:
     pain = profile.followup_pain.strip().rstrip(".") if profile.followup_pain else "follow-up gaps"
     connector_count = len([step for step in setup_steps if step.type == "integration_setup"])
     connector_phrase = f"connect {connector_count} ministry tool{'s' if connector_count != 1 else ''}" if connector_count else "connect the first ministry system"
-    return f"Start by addressing {pain}, then {connector_phrase}, while keeping writes behind pastor approval."
+    support = _short_context(profile.support_preferences, 120)
+    support_phrase = f" Support the pastor the way he asked: {support}." if support else ""
+    return f"Start by addressing {pain}, then {connector_phrase}, while keeping writes behind pastor approval.{support_phrase}"
 
 
 def _seed_context_detail(profile: PastorProfile) -> str:
@@ -8019,6 +9712,18 @@ def _setup_steps_requested(lower: str) -> bool:
     ])
 
 
+def _support_style_requested(lower: str) -> bool:
+    return _mentions(lower, [
+        "how will you support me",
+        "how can you support me",
+        "how will you help me personally",
+        "how can you help me personally",
+        "how will you support this pastor",
+        "how should i tell you to support me",
+        "what support style do you need",
+    ])
+
+
 def _context_usage_requested(lower: str) -> bool:
     return _mentions(lower, [
         "how will you use this context",
@@ -8033,6 +9738,8 @@ def _context_usage_requested(lower: str) -> bool:
 
 
 def _secure_connections_explainer_requested(lower: str) -> bool:
+    if re.search(r"\b(?:paste|enter|send)\b", lower) and _mentions(lower, ["password", "api key", "token", "secret", "credentials"]):
+        return True
     return _mentions(lower, [
         "how do secure connections work",
         "how does secure connection work",
@@ -8043,6 +9750,18 @@ def _secure_connections_explainer_requested(lower: str) -> bool:
         "how do you keep credentials safe",
         "how do you protect credentials",
         "will you ask for my password",
+        "should i paste my password",
+        "can i paste my password",
+        "paste my password",
+        "should i paste my api key",
+        "can i paste my api key",
+        "paste my api key",
+        "should i paste my token",
+        "can i paste my token",
+        "paste my token",
+        "paste credentials",
+        "credentials in chat",
+        "secrets in chat",
     ])
 
 
@@ -8211,7 +9930,8 @@ def _secure_connections_chat_response(
     reply = (
         "Secure connections work in this order: create a private workspace, use provider authorization or encrypted API-key setup, "
         "store credentials server-side, run Check credentials without importing ministry data, then sync only when you ask. "
-        "Marge will not ask for passwords in chat, and external sends or system changes still require connector policy plus your approval of the exact item. "
+        "Do not paste passwords in chat, and do not paste OAuth tokens, refresh tokens, API keys, or client secrets there either; API-key connectors use the encrypted credential form instead. "
+        "External sends or system changes still require connector policy plus your approval of the exact item. "
         f"{next_step}"
     )
     return AssistantChatResponse(
@@ -8276,7 +9996,7 @@ def _setup_step_reason(step: DeskItem, profile: PastorProfile) -> str:
             return "the connector is present but not verified; the credential check proves access without syncing people, email, calendar, or attendance data."
         tools = _short_context(profile.tools_in_use, 140)
         if tools:
-            return f"you said the church already uses {tools}, so secure setup is the path from placeholder guidance to real ministry context."
+            return f"you said the church already uses {tools}, so secure setup is the path from general guidance to real ministry context."
         return "Marge becomes more useful when she can read from the church systems you already trust, starting with secure setup rather than secrets in chat."
     return step.subtitle or step.detail or "it is the highest-leverage setup item I can see right now."
 
@@ -8388,9 +10108,10 @@ def _context_usage_chat_response(
         next_step = f"Next I would start with {priorities[0].title}: {priorities[0].action or priorities[0].detail or 'review this before the day gets away'}."
     else:
         next_step = "Next I would keep watching people, visitors, care, prayer, and connected tools for anything that needs follow-up."
+    support_clause = "support you in the way you named" if _clean(profile.support_preferences) else "learn how to support you personally"
     reply = (
         f"{summary} {implications} "
-        f"{next_step} I use this context only inside this workspace to prioritize care, shape drafts in your voice, recommend secure connectors, "
+        f"{next_step} I use this context only inside this workspace to prioritize care, {support_clause}, shape drafts in your voice, recommend secure connectors, "
         "and keep external sends or system changes behind your approval."
     )
     return AssistantChatResponse(
@@ -8399,6 +10120,121 @@ def _context_usage_chat_response(
         mode=effective_mode,
         actions=setup_steps[:3] if setup_steps else priorities[:3],
         suggested_prompts=_suggested_prompts(profile, priorities, setup_steps),
+        profile=_profile_response(profile, account),
+    )
+
+
+def _support_style_chat_response(
+    setup_steps: List[DeskItem],
+    priorities: List[DeskItem],
+    effective_mode: Literal["demo", "live"],
+    profile: PastorProfile,
+    account: Optional[ChurchAccount],
+) -> AssistantChatResponse:
+    support = _clean(profile.support_preferences)
+    question = _interview_question(profile)
+    actions = setup_steps[:3] if setup_steps else priorities[:3]
+    if support:
+        context_parts = []
+        if _clean(profile.followup_pain):
+            context_parts.append(f"keep {profile.followup_pain.strip().rstrip('.')} from going quiet")
+        if _clean(profile.ministry_priorities):
+            context_parts.append(f"move {profile.ministry_priorities.strip().rstrip('.')} first")
+        if _clean(profile.weekly_rhythm):
+            context_parts.append("protect the weekly rhythm you named")
+        context = f" I will use that to {', '.join(context_parts[:3])}." if context_parts else ""
+        reply = (
+            f"You told me to support you this way: {support.strip().rstrip('.')}. "
+            f"I will treat that as pastoral operating context, not as something I share externally.{context} "
+            "I will still keep sends, schedule changes, connector syncs, and system writes behind checked credentials and your approval."
+        )
+    elif question and question.get("field") == "support_preferences":
+        reply = (
+            "I do not want to guess how to support you personally. "
+            f"{question['question']} {question.get('why') or ''}".strip()
+        )
+        actions = [_profile_question_desk_item(question)]
+    elif question:
+        reply = (
+            "I can support you better after I learn the next piece of ministry context. "
+            f"{question['question']} {question.get('why') or ''}".strip()
+        )
+        actions = [_profile_question_desk_item(question)]
+    else:
+        reply = (
+            "Tell me how you want to be supported when ministry gets heavy: whether to nudge gently, protect rest, surface missed people, "
+            "or keep you from carrying every loop alone. I will use that only inside this workspace to shape proactive reminders and review queues."
+        )
+    return AssistantChatResponse(
+        reply=reply,
+        intent="support_style_guidance",
+        mode=effective_mode,
+        actions=actions,
+        suggested_prompts=_suggested_prompts(profile, priorities, setup_steps),
+        profile=_profile_response(profile, account),
+    )
+
+
+def _pastor_pressure_response(
+    profile: PastorProfile,
+    priorities: List[DeskItem],
+    email_drafts: List[DeskItem],
+    calendar_blocks: List[DeskItem],
+    setup_steps: List[DeskItem],
+    pending_actions: List[AssistantAction],
+    effective_mode: Literal["demo", "live"],
+    account: Optional[ChurchAccount],
+) -> AssistantChatResponse:
+    support = _short_context(profile.support_preferences, 180)
+    rhythm = _short_context(profile.weekly_rhythm, 180)
+    actions: List[DeskItem] = []
+    if setup_steps:
+        next_work = setup_steps[0]
+        actions.append(next_work)
+        next_sentence = (
+            f"I would make the next step small: {next_work.title}. "
+            f"{next_work.action or next_work.subtitle or next_work.detail or 'That gives me one real place to help without guessing.'}"
+        )
+    elif priorities:
+        next_work = priorities[0]
+        actions.extend(priorities[:3])
+        next_sentence = (
+            f"I would put the first real item in front of you and let the rest wait: {next_work.title}. "
+            f"{next_work.action or next_work.detail or next_work.subtitle or 'Review this before anything else.'}"
+        )
+    elif pending_actions:
+        first_action = pending_actions[0]
+        actions.extend(_desk_item_from_action(action) for action in pending_actions[:3])
+        next_sentence = (
+            f"I would start by reviewing {first_action.title}; it is staged, and nothing external happens unless you approve it."
+        )
+    elif email_drafts or calendar_blocks:
+        actions.extend(email_drafts[:2])
+        actions.extend(calendar_blocks[:2])
+        next_sentence = "I would only touch the reviewable drafts or calendar blocks already on the desk, then leave lower-trust work alone."
+    else:
+        next_sentence = "I do not see a must-handle item in the current workspace, so I would protect a quieter ministry block instead of inventing work."
+
+    support_sentence = (
+        f"You told me to support you this way: {support}. "
+        if support
+        else "I still need to learn how you want to be supported when ministry feels heavy. "
+    )
+    rhythm_sentence = f"I will keep this rhythm in view: {rhythm}. " if rhythm else ""
+    reply = (
+        f"{support_sentence}{rhythm_sentence}"
+        f"{next_sentence} I can help triage what can wait, draft only for review, and keep sends, calendar writes, connector syncs, and system changes behind approval."
+    )
+    if not support:
+        question = _interview_question(profile) or next((q for q in ONBOARDING_QUESTIONS if q["id"] == "support_preferences"), None)
+        if question:
+            actions.insert(0, _profile_question_desk_item(question))
+    return AssistantChatResponse(
+        reply=reply,
+        intent="pastor_support",
+        mode=effective_mode,
+        actions=actions[:5],
+        suggested_prompts=["What can wait until next week?", "What should I handle next?", "Show my approvals."],
         profile=_profile_response(profile, account),
     )
 
@@ -8488,7 +10324,7 @@ def _care_case_guidance_response(
     reply = (
         "For a care case, I need a real person first, the care category such as hospital, grief, crisis, or general, "
         "what happened, the latest contact, who should know, and the next pastoral step. "
-        "Example: Help me open the first care case: Ruth Carter is grieving her mother and needs a visit. "
+        "Use the person's real name and the actual situation; for example, tell me the category, what happened, the latest contact, and the next visit or call to protect. "
         "I keep medical, grief, and crisis details scoped to this workspace and only draft or schedule follow-up for review."
     )
     if care_cases:
@@ -8509,6 +10345,28 @@ def _care_case_guidance_response(
     )
 
 
+def _care_visit_needs_context_response(
+    db: Session,
+    profile: PastorProfile,
+    account: Optional[ChurchAccount],
+    effective_mode: Literal["demo", "live"],
+    seed_step: Optional[DeskItem],
+) -> AssistantChatResponse:
+    response = _care_case_guidance_response(db, profile, account, effective_mode)
+    response.reply = (
+        "Before I can protect a care visit window, I need the real person or active care case first. "
+        + response.reply
+    )
+    if seed_step and not response.actions:
+        response.actions = [seed_step]
+        response.suggested_prompts = [
+            "Help me open the first care case.",
+            "Help me add a ministry update.",
+            "Show my setup steps.",
+        ]
+    return response
+
+
 def _person_capture_guidance_response(
     seed_step: Optional[DeskItem],
     effective_mode: Literal["demo", "live"],
@@ -8517,8 +10375,8 @@ def _person_capture_guidance_response(
 ) -> AssistantChatResponse:
     reply = (
         "To add a person safely, give me a real name first, then optional contact details and why they need pastoral attention. "
-        "If the update is really about a visitor, care case, or private prayer request, include that context so I can attach it to the right record instead of creating a vague placeholder. "
-        "Example: Help me add Ruth Carter as a person with ruth@example.test. She is grieving her mother and needs a visit."
+        "If the update is really about a visitor, care case, or private prayer request, include that context so I can attach it to the right record instead of creating a vague person record. "
+        "Use the person's real name and any actual contact details you have; I can keep care, visitor, or prayer context attached to that real record."
     )
     actions = [seed_step] if seed_step and seed_step.type == "data_seed" else []
     return AssistantChatResponse(
@@ -8578,6 +10436,14 @@ def _first_week_plan(profile: PastorProfile, setup_steps: List[DeskItem]) -> Lis
             "guardrail": "Use secure setup; do not paste API keys, OAuth secrets, passwords, or refresh tokens into chat.",
         })
 
+    if _clean(profile.support_preferences):
+        plan.append({
+            "title": "Support the pastor the way he asked",
+            "why": profile.support_preferences,
+            "action": "Shape proactive nudges and summaries around this support style.",
+            "guardrail": "Do not turn personal support preferences into external writes without approval.",
+        })
+
     if _clean(profile.weekly_rhythm):
         plan.append({
             "title": "Protect the pastor's weekly rhythm",
@@ -8608,7 +10474,7 @@ def _first_week_plan(profile: PastorProfile, setup_steps: List[DeskItem]) -> Lis
         "action": "Review priorities and approvals",
         "guardrail": "Review audit logs and connector policies as integrations are enabled.",
     })
-    return _dedupe_plan(plan)[:6]
+    return _dedupe_plan(plan)[:8]
 
 
 def _first_week_plan_chat_summary(plan: List[dict]) -> str:
@@ -8667,9 +10533,21 @@ def _meeting_prep_lookup_response(
     db: Session,
     profile: PastorProfile,
     account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
     effective_mode: Literal["demo", "live"],
 ) -> AssistantChatResponse:
     connected_events = _connected_items(db, "calendar_event", account=account, limit=5)
+    integrations = _integration_statuses(db, account, user)
+    calendar_statuses = [
+        item
+        for item in integrations
+        if item.provider in {"planning_center", "microsoft_365", "google_workspace", "breeze"}
+    ]
+    verified_calendar = [
+        item
+        for item in calendar_statuses
+        if item.status in {"connected", "configured", "available"} and item.verified_at
+    ]
     pending_meeting_actions = [
         action
         for action in _pending_assistant_actions(db, account)
@@ -8690,27 +10568,96 @@ def _meeting_prep_lookup_response(
             f"{item.title}: {item.subtitle or _date_label(item.occurred_at) or item.snippet or 'upcoming event'}"
             for item in connected_events[:4]
         )
+        refresh_state = _connected_items_refresh_state(profile, integrations, connected_events)
         reply = (
             f"These synced meetings or events need prep in view: {lines}. "
             "I can prepare the next meeting brief as a review item, and I will not change the external calendar without approval."
         )
+        if refresh_state["note"]:
+            reply += f" {refresh_state['note']}"
     elif pending_meeting_actions:
+        refresh_state = _connected_refresh_state_for_providers(
+            profile,
+            integrations,
+            [action.source for action in pending_meeting_actions],
+        )
         lines = "; ".join(action.title for action in pending_meeting_actions[:4])
         reply = (
             f"These meeting prep items are already waiting in the approval queue: {lines}. "
             "Review them before making calendar or follow-up changes."
         )
+        if refresh_state["note"]:
+            reply += f" {refresh_state['note']}"
     else:
-        reply = (
-            "I do not have synced calendar meetings to prep yet. Connect and verify Planning Center, Google Workspace, Microsoft 365, or Breeze, "
-            "then sync the calendar so I can brief upcoming meetings from real context."
-        )
+        refresh_state = {"note": "", "actions": [], "refresh_prompt": None}
+        setup_steps = _calendar_context_setup_steps(profile, integrations)
+        if verified_calendar:
+            display = verified_calendar[0].display_name
+            reply = (
+                f"I do not have synced calendar meetings to prep yet. {display} credentials are checked, so the next safe step is to "
+                "sync calendar context when you want me to import upcoming meetings for review."
+            )
+            prompts = [f"Sync {display}.", "Open integrations.", "Explain the approval rules."]
+        else:
+            reply = (
+                "I do not have synced calendar meetings to prep yet because no calendar-capable church tool has completed secure setup "
+                "and a no-sync credential check. I attached the next setup or credential-check cards before any calendar sync."
+            )
+            prompts = _connector_setup_or_check_prompts(setup_steps)
+            actions.extend(setup_steps)
+    if connected_events or pending_meeting_actions:
+        if refresh_state["actions"]:
+            actions = _dedupe_desk_items(actions + refresh_state["actions"][:1])
+        prompts = ["Prepare my next meeting.", "Show my approvals."]
+        if refresh_state["refresh_prompt"]:
+            prompts.append(refresh_state["refresh_prompt"])
     return AssistantChatResponse(
         reply=reply,
         intent="meeting_prep_lookup",
         mode=effective_mode,
         actions=actions[:5],
-        suggested_prompts=["Prepare my next meeting.", "Show my approvals.", "Sync the calendar again."],
+        suggested_prompts=prompts,
+        profile=_profile_response(profile, account),
+    )
+
+
+def _calendar_context_setup_steps(profile: PastorProfile, integrations: List[IntegrationStatus]) -> List[DeskItem]:
+    providers: List[str] = []
+    for provider in _recommended_providers(profile) + ["planning_center", "microsoft_365", "google_workspace", "breeze"]:
+        if provider in {"planning_center", "microsoft_365", "google_workspace", "breeze"} and provider not in providers:
+            providers.append(provider)
+    steps = []
+    for provider in providers:
+        step = _provider_setup_or_check_step(
+            profile,
+            integrations,
+            provider,
+            subtitle=f"Use {_provider_display_name(provider)} when you want Marge to prep meetings from real calendar context.",
+            detail="Start secure setup first. Marge checks credentials without syncing before any calendar context is imported.",
+        )
+        if step:
+            steps.append(step)
+    return steps
+
+
+def _calendar_sync_not_connected_response(
+    profile: PastorProfile,
+    integrations: List[IntegrationStatus],
+    account: Optional[ChurchAccount],
+    effective_mode: Literal["demo", "live"],
+) -> AssistantChatResponse:
+    steps = _calendar_context_setup_steps(profile, integrations)
+    reply = (
+        "I cannot sync calendar context yet because no calendar-capable church tool has completed secure setup "
+        "and a no-sync credential check. I attached the next calendar setup or credential-check cards. "
+        "After credentials pass, ask me to sync the calendar again and I will import upcoming ministry events as review context."
+    )
+    return AssistantChatResponse(
+        reply=reply,
+        intent="sync_calendar_not_connected",
+        mode=effective_mode,
+        actions=steps[:4],
+        suggested_prompts=_connector_setup_or_check_prompts(steps),
         profile=_profile_response(profile, account),
     )
 
@@ -8776,7 +10723,7 @@ def _connected_tools_sync_response(
                 result = _sync_connected_provider(db, item.provider, account, user)
                 synced.append((item, result))
             except HTTPException as exc:
-                failed.append((item, exc.detail))
+                failed.append((item, _redact_secret_text(exc.detail)))
         if synced:
             lines = "; ".join(
                 f"{item.display_name}: {result.items_seen} item(s), {result.actions_prepared} review item(s)"
@@ -8803,15 +10750,16 @@ def _connected_tools_sync_response(
         try:
             verification = _verify_integration(db, item.provider, account, user)
         except HTTPException as exc:
+            check_step = _integration_check_credentials_step(item, profile)
             return AssistantChatResponse(
                 reply=(
                     f"I stopped before syncing {item.display_name} because credentials need to be checked first. "
-                    f"The safe credential check failed: {exc.detail}. No ministry data was imported and no actions were queued."
+                    f"The safe credential check failed: {_redact_secret_text(exc.detail)}. No ministry data was imported and no actions were queued."
                 ),
                 intent="integration_verify_failed_before_sync",
                 mode=effective_mode,
-                actions=[],
-                suggested_prompts=["Open integrations.", f"Start {item.display_name} setup."],
+                actions=[check_step],
+                suggested_prompts=[f"Check {item.display_name} credentials.", "Open integrations.", f"Start {item.display_name} setup."],
                 profile=_profile_response(profile, account),
             )
         identity_summary = _verification_identity_summary(verification.identity)
@@ -8887,6 +10835,44 @@ def _sync_connected_provider(
     raise HTTPException(status_code=404, detail=f"Unknown integration provider: {provider}")
 
 
+def _provider_sync_not_ready_response(
+    profile: PastorProfile,
+    integrations: List[IntegrationStatus],
+    provider: str,
+    account: Optional[ChurchAccount],
+    effective_mode: Literal["demo", "live"],
+) -> Optional[dict]:
+    status = next((item for item in integrations if item.provider == provider), None)
+    if status and status.status in {"connected", "configured", "available"}:
+        return None
+    step = _provider_setup_or_check_step(
+        profile,
+        integrations,
+        provider,
+        subtitle=f"Use {_provider_display_name(provider)} when this church is ready for Marge to import real ministry context.",
+        detail="Start secure setup first. Marge checks credentials without syncing before any people, email, calendar, or attendance context is imported.",
+    )
+    actions = [step] if step else []
+    display = _provider_display_name(provider)
+    return {
+        "reply": (
+            f"I cannot sync {display} yet because it has not completed secure setup and a no-sync credential check. "
+            "I attached the next setup or credential-check card. After credentials pass, ask me to sync again and I will import current ministry context for review."
+        ),
+        "intent": _provider_sync_not_ready_intent(provider),
+        "mode": effective_mode,
+        "actions": actions,
+        "suggested_prompts": _connector_setup_or_check_prompts(actions),
+        "profile": _profile_response(profile, account),
+    }
+
+
+def _provider_sync_not_ready_intent(provider: str) -> str:
+    if provider == "rock":
+        return "sync_rock_rms_not_connected"
+    return f"sync_{provider}_not_connected"
+
+
 def _mail_sync_provider(
     db: Session,
     profile: PastorProfile,
@@ -8923,10 +10909,6 @@ def _calendar_sync_provider(
     ]
     if not ready:
         return None
-    recommended = _recommended_providers(profile)
-    for provider in recommended:
-        if provider in ready:
-            return provider
     return ready[0]
 
 
@@ -8941,7 +10923,9 @@ def _calendar_write_provider(
     ready = [
         provider
         for provider in ["microsoft_365", "google_workspace"]
-        if statuses.get(provider) and statuses[provider].status == "connected"
+        if statuses.get(provider)
+        and statuses[provider].status == "connected"
+        and statuses[provider].verified_at
     ]
     if not ready:
         return None
@@ -8995,13 +10979,14 @@ def _calendar_details_help_response(
     else:
         actions = _calendar_write_setup_steps(integrations)[:2]
         provider_sentence = (
-            "I do not see a connected Google Workspace or Microsoft 365 calendar yet, so I attached the setup or credential-check cards for those tools. "
+            "I do not see a credential-checked Google Workspace or Microsoft 365 calendar yet, so I attached the setup or credential-check cards for those tools. "
         )
 
+    example_prompt = _calendar_event_example_prompt(db, profile, account)
     reply = (
         "To queue a calendar event I need a title, a date in YYYY-MM-DD format, and a start time. "
         "Optional details are duration, location, and attendee email addresses. "
-        "Example: Queue a calendar event for Hospital follow-up with Marcus on 2026-05-18 at 3pm for 1 hour location County Hospital with marcus@example.test. "
+        f"Example format: {example_prompt} "
         f"{provider_sentence}"
         "I stage the event as a review item first. The external calendar write happens only after credentials are checked, writeback policy allows calendar_block, "
         "and you approve that exact event."
@@ -9011,13 +10996,75 @@ def _calendar_details_help_response(
         intent="calendar_event_details_help",
         mode=effective_mode,
         actions=actions,
-        suggested_prompts=[
-            "Queue a calendar event for Hospital follow-up with Marcus on 2026-05-18 at 3pm.",
-            "Open integrations.",
-            "Explain the approval rules.",
-        ],
+        suggested_prompts=_calendar_help_suggested_prompts(example_prompt, actions),
         profile=_profile_response(profile, account),
     )
+
+
+def _calendar_help_suggested_prompts(example_prompt: str, actions: List[DeskItem]) -> List[str]:
+    prompts = [example_prompt]
+    setup_prompts = _connector_setup_or_check_prompts(actions)
+    if setup_prompts:
+        prompts.append(setup_prompts[0])
+    prompts.append("Explain the approval rules.")
+    result = []
+    seen = set()
+    for prompt in prompts:
+        cleaned = (prompt or "").strip()
+        if cleaned and cleaned not in seen:
+            result.append(cleaned)
+            seen.add(cleaned)
+    return result
+
+
+def _calendar_event_example_prompt(
+    db: Session,
+    profile: PastorProfile,
+    account: Optional[ChurchAccount],
+) -> str:
+    example_date = (date.today() + timedelta(days=1)).isoformat()
+    subject = _calendar_event_example_subject(db, profile, account).strip(" .")
+    return f"Queue a calendar event for {subject} on {example_date} at 3pm for 1 hour."
+
+
+def _calendar_event_example_subject(
+    db: Session,
+    profile: PastorProfile,
+    account: Optional[ChurchAccount],
+) -> str:
+    care = (
+        scoped_query(db.query(CareNote), CareNote, account)
+        .filter(CareNote.status == "active")
+        .order_by(CareNote.created_at.desc())
+        .first()
+    )
+    if care and care.member:
+        category = _label(_enum_value(care.category)).lower()
+        prefix = "care" if category == "general" else f"{category} care"
+        return f"{prefix} follow-up with {care.member.full_name}"
+
+    visitor = (
+        scoped_query(db.query(Visitor), Visitor, account)
+        .order_by(Visitor.visit_date.desc(), Visitor.created_at.desc())
+        .first()
+    )
+    if visitor:
+        return f"visitor follow-up with {visitor.full_name}"
+
+    prayer = (
+        scoped_query(db.query(PrayerRequest), PrayerRequest, account)
+        .filter(PrayerRequest.status == "active")
+        .order_by(PrayerRequest.created_at.desc())
+        .first()
+    )
+    prayer_name = _prayer_subject_name(prayer) if prayer else None
+    if prayer_name:
+        return f"prayer follow-up with {prayer_name}"
+
+    context = _clean(getattr(profile, "followup_pain", None) or getattr(profile, "ministry_priorities", None))
+    if context:
+        return f"{_short_context(context, 64).strip(' .')} follow-up"
+    return "the follow-up you want protected"
 
 
 def _calendar_write_setup_steps(integrations: List[IntegrationStatus]) -> List[DeskItem]:
@@ -9057,6 +11104,176 @@ def _calendar_write_setup_steps(integrations: List[IntegrationStatus]) -> List[D
             provider=provider,
         ))
     return steps
+
+
+def _email_inbox_setup_steps(profile: PastorProfile, integrations: List[IntegrationStatus]) -> List[DeskItem]:
+    steps: List[DeskItem] = []
+    providers: List[str] = []
+    for provider in _recommended_providers(profile) + ["google_workspace", "microsoft_365"]:
+        if provider in {"google_workspace", "microsoft_365"} and provider not in providers:
+            providers.append(provider)
+    for provider in providers:
+        integration = next((item for item in integrations if item.provider == provider), None)
+        if not integration:
+            continue
+        sync_ready = integration.status in {"connected", "configured", "available"}
+        if sync_ready and integration.verified_at:
+            action = "Sync inbox"
+            title = f"Sync {integration.display_name} inbox"
+            subtitle = f"{integration.display_name} credentials are checked; syncing imports recent messages as review context."
+            detail = "Marge can queue inbox-based reply drafts for review after you ask to sync. She will not send externally without exact approval."
+            step_id = f"setup-email-sync-{provider}"
+        elif sync_ready:
+            action = "Check credentials"
+            title = f"Check {integration.display_name} credentials"
+            subtitle = f"Marge can see {integration.display_name}, but has not verified mailbox access."
+            detail = "Credential checks confirm access without importing email, calendar, people, or attendance context."
+            step_id = f"setup-email-verify-{provider}"
+        else:
+            action = "Start secure setup"
+            title = f"Connect {integration.display_name}"
+            subtitle = f"Use {integration.display_name} when you want Marge to triage ministry email and prepare reviewable replies."
+            detail = integration.config_hint or integration.secure_note
+            step_id = f"setup-email-connect-{provider}"
+        steps.append(DeskItem(
+            id=step_id,
+            type="integration_setup",
+            title=title,
+            subtitle=subtitle,
+            detail=detail,
+            priority="high" if provider in set(_recommended_providers(profile)) else "medium",
+            action=action,
+            source="integrations",
+            provider=provider,
+        ))
+    return steps
+
+
+def _verified_email_integrations(integrations: List[IntegrationStatus]) -> List[IntegrationStatus]:
+    return [
+        item
+        for item in integrations
+        if item.provider in {"google_workspace", "microsoft_365"}
+        and item.status in {"connected", "configured", "available"}
+        and item.verified_at
+    ]
+
+
+def _email_setup_prompts(steps: List[DeskItem], *, verified_display: Optional[str] = None) -> List[str]:
+    if verified_display:
+        return [f"Sync {verified_display}.", "Open integrations.", "Explain the approval rules."]
+    first = steps[0] if steps else None
+    return [
+        _setup_prompt(first) if first else "Open integrations.",
+        "How do secure connections work?",
+        "Explain the approval rules.",
+    ]
+
+
+def _mailbox_sync_not_connected_response(
+    profile: PastorProfile,
+    integrations: List[IntegrationStatus],
+    account: Optional[ChurchAccount],
+    effective_mode: Literal["demo", "live"],
+) -> AssistantChatResponse:
+    steps = _email_inbox_setup_steps(profile, integrations)
+    reply = (
+        "I cannot sync the inbox yet because no Google Workspace or Microsoft 365 mailbox has completed secure setup "
+        "and a no-sync credential check. I attached the next mail setup or credential-check cards. "
+        "After credentials pass, ask me to sync the inbox again and I will import recent ministry email as review context without sending anything."
+    )
+    return AssistantChatResponse(
+        reply=reply,
+        intent="sync_mailbox_not_connected",
+        mode=effective_mode,
+        actions=steps[:3],
+        suggested_prompts=_email_setup_prompts(steps),
+        profile=_profile_response(profile, account),
+    )
+
+
+def _empty_synced_inbox_chat_response(
+    db: Session,
+    account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
+    user_message: str,
+    profile: PastorProfile,
+    effective_mode: Literal["demo", "live"],
+    *,
+    intent: str,
+    drafting: bool,
+) -> AssistantChatResponse:
+    integrations = _integration_statuses(db, account, user)
+    verified = _verified_email_integrations(integrations)
+    steps = _email_inbox_setup_steps(profile, integrations)
+    if verified:
+        display = verified[0].display_name
+        reply = (
+            f"I do not have synced inbox items{' to draft from' if drafting else ''} yet. "
+            f"{display} credentials are checked, so the next safe step is to sync when you want me to import recent ministry email as review context. "
+            "I will queue anything sensitive for review and will not send externally without your exact approval."
+        )
+        actions = steps[:1]
+        prompts = _email_setup_prompts(steps, verified_display=display)
+    else:
+        reply = (
+            f"I do not have synced inbox items{' to draft from' if drafting else ''} yet because no Google Workspace or Microsoft 365 mailbox has completed secure setup and a no-sync credential check. "
+            "I attached the next mail setup or credential-check cards. After credentials pass, ask me to sync and I will import recent ministry email as review context without sending anything."
+        )
+        actions = steps[:2]
+        prompts = _email_setup_prompts(steps)
+    return _chat_turn_response(db, account, user, user_message,
+        reply=reply,
+        intent=intent,
+        mode=effective_mode,
+        actions=actions,
+        suggested_prompts=prompts,
+        profile=_profile_response(profile, account),
+    )
+
+
+def _draft_replies_empty_chat_response(
+    db: Session,
+    account: Optional[ChurchAccount],
+    user: Optional[AccountUser],
+    user_message: str,
+    profile: PastorProfile,
+    effective_mode: Literal["demo", "live"],
+) -> AssistantChatResponse:
+    integrations = _integration_statuses(db, account, user)
+    verified = _verified_email_integrations(integrations)
+    steps = _email_inbox_setup_steps(profile, integrations)
+    if verified:
+        display = verified[0].display_name
+        reply = (
+            "I do not see a visitor, care, or prayer item that needs a local ministry draft right now. "
+            f"{display} credentials are checked, but I do not have synced inbox items loaded; ask me to sync when you want me to import recent messages and queue reviewable replies."
+        )
+        actions = steps[:1]
+        prompts = _email_setup_prompts(steps, verified_display=display)
+    elif steps:
+        reply = (
+            "I do not see a visitor, care, or prayer item that needs a local ministry draft right now, "
+            "and I cannot draft from the inbox until a Google Workspace or Microsoft 365 mailbox completes secure setup and a no-sync credential check. "
+            "I attached the next mail setup cards so inbox drafting starts from real connected context."
+        )
+        actions = steps[:2]
+        prompts = _email_setup_prompts(steps)
+    else:
+        reply = (
+            "I do not see a visitor, care, prayer, or synced inbox item that needs a draft right now. "
+            "Give me the real person or ministry update first, and I will prepare the reply for review."
+        )
+        actions = []
+        prompts = ["Help me add a ministry update.", "Open integrations.", "Explain the approval rules."]
+    return _chat_turn_response(db, account, user, user_message,
+        reply=reply,
+        intent="draft_replies_empty",
+        mode=effective_mode,
+        actions=actions,
+        suggested_prompts=prompts,
+        profile=_profile_response(profile, account),
+    )
 
 
 def _calendar_event_write_requested(lower: str) -> bool:
@@ -9226,6 +11443,9 @@ def _prepare_email_reply_from_connected_item(
     payload = _json_loads(item.payload_json).get("email") or {}
     raw_from = payload.get("from") or item.subtitle or ""
     display_name, email_address = parseaddr(raw_from)
+    if email_address and "@" not in email_address:
+        display_name = display_name or email_address
+        email_address = ""
     recipient = _recipient_first_name(display_name or email_address or raw_from)
     subject = item.title or payload.get("subject") or "Your note"
     body = _connected_email_reply_body(profile, recipient, subject, item.snippet)
@@ -9240,8 +11460,12 @@ def _prepare_email_reply_from_connected_item(
         "drafting_voice": profile.communication_style or "warm and brief",
         "church_context": profile.church_context,
         "faith_tradition": profile.faith_tradition,
+        "support_preferences": profile.support_preferences,
         "guardrail": profile.guardrails or DEFAULT_GUARDRAILS,
     }
+    member = _member_for_connected_email_sender(db, account, display_name, email_address, raw_from)
+    if member:
+        _add_member_review_context(db, account, member, draft_context)
     external_provider = provider if provider in {"google_workspace", "microsoft_365"} and email_address else None
     action = _upsert_prepared_action(
         db,
@@ -9272,6 +11496,30 @@ def _prepare_email_reply_from_connected_item(
     return action
 
 
+def _member_for_connected_email_sender(
+    db: Session,
+    account: Optional[ChurchAccount],
+    display_name: Optional[str],
+    email_address: Optional[str],
+    raw_from: Optional[str],
+) -> Optional[Member]:
+    query = scoped_query(db.query(Member), Member, account)
+    email = _clean(email_address)
+    if email and "@" in email:
+        existing = query.filter(Member.email.ilike(email)).first()
+        if existing:
+            return existing
+    name = _clean(display_name)
+    if not name and raw_from and "@" not in raw_from:
+        name = _clean(raw_from)
+    if not name:
+        return None
+    first, last = _split_person_name(name)
+    if first and last:
+        return query.filter(Member.first_name.ilike(first), Member.last_name.ilike(last)).first()
+    return None
+
+
 def _prepare_connected_meeting_prep(db: Session, profile: PastorProfile, lower: str, account: Optional[ChurchAccount] = None) -> Optional[AssistantAction]:
     item = _best_connected_item(db, "calendar_event", lower, account)
     if not item:
@@ -9286,7 +11534,12 @@ def _prepare_connected_meeting_prep(db: Session, profile: PastorProfile, lower: 
         action_type="meeting_prep",
         title=f"Prepare for {summary}",
         description=item.subtitle or item.snippet or "Upcoming calendar event",
-        payload={"connected_item_id": item.id, "calendar_event": payload, "brief": prep},
+        payload={
+            "connected_item_id": item.id,
+            "calendar_event": payload,
+            "brief": prep,
+            "review_context": _meeting_review_context_for_event(db, account, payload),
+        },
         source=provider,
         external_provider=None,
         related_type="calendar_event",
@@ -9310,6 +11563,112 @@ def _prepare_connected_meeting_prep(db: Session, profile: PastorProfile, lower: 
     return action
 
 
+def _meeting_review_context_for_event(
+    db: Session,
+    account: Optional[ChurchAccount],
+    event: dict,
+) -> dict:
+    members = _members_for_calendar_event(db, account, event)
+    if not members:
+        return {}
+    context = {
+        "matched_members": [
+            {"member_id": member.id, "member_name": member.full_name}
+            for member in members[:5]
+        ],
+    }
+    member_context = []
+    for member in members[:5]:
+        care_cases = _member_active_care_cases(db, account, member)
+        prayers = _member_active_prayers(db, account, member)
+        context_row = {"member_id": member.id, "member_name": member.full_name}
+        if care_cases:
+            context_row["active_care"] = [_care_case_summary(case) for case in care_cases[:2]]
+        if prayers:
+            context_row["active_prayer"] = [_prayer_summary(prayer) for prayer in prayers[:2]]
+        if context_row.get("active_care") or context_row.get("active_prayer"):
+            member_context.append(context_row)
+    if member_context:
+        context["member_context"] = member_context
+    preferences = []
+    for member in members[:5]:
+        for note in _member_preference_notes_for_draft(db, account, member):
+            preferences.append({
+                "member_id": member.id,
+                "member_name": member.full_name,
+                "note_id": note.id,
+                "text": _short_context(note.note_text, 180),
+            })
+    if preferences:
+        if len(members) == 1:
+            context["member_id"] = members[0].id
+            context["member_name"] = members[0].full_name
+        context["member_preferences"] = preferences[:8]
+        context["member_preference_guardrail"] = (
+            "Pastor-only review context. Respect these preferences while preparing for the meeting, "
+            "but do not write or send sensitive preference details externally."
+        )
+    return context
+
+
+def _members_for_calendar_event(
+    db: Session,
+    account: Optional[ChurchAccount],
+    event: dict,
+) -> List[Member]:
+    matches: List[Member] = []
+    seen: set[int] = set()
+    for participant in _calendar_event_participants(event):
+        member = _member_for_calendar_participant(db, account, participant)
+        if member and member.id not in seen:
+            matches.append(member)
+            seen.add(member.id)
+    return matches
+
+
+def _calendar_event_participants(event: dict) -> List[dict]:
+    participants: List[dict] = []
+
+    def add(value: Any) -> None:
+        if not value:
+            return
+        if isinstance(value, dict):
+            name = _clean(value.get("displayName") or value.get("name"))
+            email_address = _clean(value.get("email") or value.get("address"))
+        else:
+            display_name, parsed_email = parseaddr(str(value))
+            name = _clean(display_name)
+            email_address = _clean(parsed_email)
+        if name or email_address:
+            participants.append({"name": name, "email": email_address})
+
+    add(event.get("organizer"))
+    add(event.get("creator"))
+    for attendee in event.get("attendees") or []:
+        add(attendee)
+    return participants
+
+
+def _member_for_calendar_participant(
+    db: Session,
+    account: Optional[ChurchAccount],
+    participant: dict,
+) -> Optional[Member]:
+    query = scoped_query(db.query(Member), Member, account)
+    email = _clean(participant.get("email"))
+    if email and "@" in email:
+        existing = query.filter(Member.email.ilike(email)).first()
+        if existing:
+            return existing
+    name = _clean(participant.get("name"))
+    if not name:
+        return None
+    first, last = _split_person_name(name)
+    if first and last:
+        return query.filter(Member.first_name.ilike(first), Member.last_name.ilike(last)).first()
+    return None
+
+
 def _best_connected_item(db: Session, item_type: str, lower: str, account: Optional[ChurchAccount] = None) -> Optional[ConnectedContextItem]:
     items = _connected_items(db, item_type, account=account, limit=10)
     if not items:
@@ -9325,14 +11684,14 @@ def _best_connected_item(db: Session, item_type: str, lower: str, account: Optio
 def _recipient_first_name(value: str) -> str:
     cleaned = (value or "").replace('"', "").strip()
     if not cleaned:
-        return "friend"
+        return "there"
     if "@" in cleaned and " " not in cleaned:
         cleaned = cleaned.split("@", 1)[0].replace(".", " ").replace("_", " ")
-    return cleaned.split()[0].strip(",") or "friend"
+    return cleaned.split()[0].strip(",") or "there"
 
 
 def _connected_email_reply_body(profile: PastorProfile, recipient: str, subject: str, snippet: Optional[str]) -> str:
-    pastor = _profile_pastor_name(profile)
+    pastor = pastor_display_name(_profile_pastor_name(profile))
     context = f" I saw your note about {snippet.strip()}" if snippet else ""
     return (
         f"Hi {recipient},\n\n"
@@ -9344,10 +11703,10 @@ def _connected_email_reply_body(profile: PastorProfile, recipient: str, subject:
 
 def _connected_meeting_prep_text(profile: PastorProfile, item: ConnectedContextItem, payload: dict) -> str:
     summary = item.title or payload.get("summary") or payload.get("subject") or payload.get("name") or "this meeting"
-    when = item.subtitle or payload.get("when") or "time not listed"
-    description = item.snippet or payload.get("description") or payload.get("bodyPreview") or "No description synced."
-    context = profile.church_context or "Use the pastor's saved ministry context."
-    tradition = profile.faith_tradition or "Use the pastor's saved church voice."
+    when = item.subtitle or payload.get("when") or "Time was not included by the connected calendar."
+    description = item.snippet or payload.get("description") or payload.get("bodyPreview") or "No description was included by the connected calendar."
+    context = profile.church_context or "Ask the pastor for local ministry context before making assumptions."
+    tradition = profile.faith_tradition or "Ask the pastor what church voice or tradition to respect before drafting outward."
     guardrails = profile.guardrails or DEFAULT_GUARDRAILS
     return (
         f"Meeting: {summary}\n"
@@ -9516,6 +11875,8 @@ def _maybe_handle_action_command(
     db: Session,
     account: Optional[ChurchAccount],
     user: Optional[AccountUser],
+    profile: PastorProfile,
+    priorities: List[DeskItem],
     message: str,
     lower: str,
     effective_mode: Literal["demo", "live"],
@@ -9526,12 +11887,31 @@ def _maybe_handle_action_command(
 
     action = _select_action_for_chat_command(db, account, lower, operation)
     if not action:
+        integrations = _integration_statuses(db, account, user)
+        setup_steps = _setup_steps(profile, integrations, needs_seed_context=_needs_seed_context(db, account, profile, effective_mode))
+        if setup_steps:
+            first_step = setup_steps[0]
+            reply = (
+                f"I do not see a matching approval item yet. The next useful step is {first_step.title}: "
+                f"{first_step.detail or first_step.subtitle or first_step.action}. "
+                "Once there is a real person, prayer, synced email, or care note to work from, I can help you review the exact staged item."
+            )
+            return AssistantChatResponse(
+                reply=reply,
+                intent="assistant_action_not_found",
+                mode=effective_mode,
+                actions=setup_steps[:3],
+                suggested_prompts=_suggested_prompts(profile, priorities, setup_steps),
+            )
         return AssistantChatResponse(
-            reply="I do not see a matching approval item yet. Ask me to draft, sync, or prepare today's queue first, then I can help you review it.",
+            reply=(
+                "I do not see a matching approval item yet. Show me the approval queue, or give me a real visitor, "
+                "prayer request, synced email, or care note and I can stage a reviewable item from it."
+            ),
             intent="assistant_action_not_found",
             mode=effective_mode,
             actions=[],
-            suggested_prompts=["Show my approvals.", "Prepare today's queue."],
+            suggested_prompts=_suggested_prompts(profile, priorities),
         )
 
     if operation == "skip":
@@ -9583,7 +11963,44 @@ def _maybe_handle_action_command(
             suggested_prompts=["Approve this draft.", "Create the approved draft."],
         )
 
-    if action.status != "approved":
+    if operation == "reschedule":
+        if action.action_type != "pastoral_reminder":
+            return None
+        due_label = _reminder_due_label(lower)
+        if not due_label:
+            return AssistantChatResponse(
+                reply=f"I can move that local reminder, but I need the new timing first: {action.title}.",
+                intent="pastoral_reminder_reschedule_needs_time",
+                mode=effective_mode,
+                actions=[_desk_item_from_action(action)],
+                suggested_prompts=["Move this reminder to Friday.", "Show my reminders."],
+            )
+        payload = _json_loads(action.payload_json)
+        reminder = payload.get("reminder") if isinstance(payload.get("reminder"), dict) else {}
+        reminder["due"] = due_label
+        payload["reminder"] = reminder
+        action.payload_json = _json_dumps(payload)
+        action.description = _pastoral_reminder_description(db, account, action, reminder)
+        _audit(
+            db,
+            "assistant_action.pastoral_reminder_rescheduled_from_chat",
+            f"Rescheduled local pastoral reminder from chat: {action.title}",
+            account=account,
+            action_id=action.id,
+            payload={"due": due_label},
+        )
+        db.commit()
+        db.refresh(action)
+        return AssistantChatResponse(
+            reply=f"Moved that local reminder to {due_label}: {action.title}. Nothing was sent, synced, or written externally.",
+            intent="pastoral_reminder_rescheduled",
+            mode=effective_mode,
+            saved=True,
+            actions=[_desk_item_from_action(action)],
+            suggested_prompts=["Show my reminders.", "What should I handle next?"],
+        )
+
+    if action.status != "approved" and not _action_can_execute_without_approval(action):
         return AssistantChatResponse(
             reply=f"I need you to approve this before I execute it: {action.title}. Say \"approve this\" if the exact item looks right.",
             intent="assistant_action_needs_approval",
@@ -9597,7 +12014,7 @@ def _maybe_handle_action_command(
     except HTTPException as exc:
         db.rollback()
         return AssistantChatResponse(
-            reply=f"I could not execute that yet: {exc.detail}",
+            reply=f"I could not execute that yet: {_redact_secret_text(exc.detail)}",
             intent="assistant_action_execution_blocked",
             mode=effective_mode,
             actions=[_desk_item_from_action(action)],
@@ -9621,17 +12038,22 @@ def _action_command_operation(lower: str) -> Optional[str]:
     context_terms = [
         "approval", "approvals", "queue", "item", "draft", "reply", "email", "message",
         "outlook", "microsoft", "gmail", "google", "person", "review", "action", "calendar",
-        "event", "first", "this", "that", "it",
+        "event", "reminder", "pastoral reminder", "first", "this", "that", "it",
     ]
     has_action_reference = _action_id_from_chat(lower) is not None or _action_text_has(lower, context_terms)
     if not has_action_reference:
         return None
     if _action_text_has(lower, ["send", "send it", "send the email", "send this", "send the draft", "send the message"]):
         return "send_refusal"
-    if _action_text_has(lower, ["skip", "dismiss", "ignore this"]):
+    if _action_text_has(lower, ["reschedule", "move", "change", "push", "snooze"]) and (
+        _action_text_has(lower, ["reminder", "pastoral reminder"])
+        or (_action_text_has(lower, ["it", "this", "that"]) and _reminder_due_label(lower))
+    ):
+        return "reschedule"
+    if _action_text_has(lower, ["skip", "dismiss", "ignore this", "cancel", "cancel this", "cancel that", "cancel reminder", "cancel the reminder"]):
         return "skip"
     if _action_text_has(lower, [
-        "execute", "mark done", "done", "create the", "create a", "create an", "create it",
+        "execute", "mark done", "done", "complete", "completed", "create the", "create a", "create an", "create it",
         "create draft", "create outlook", "create gmail", "create event", "prepare reply",
         "add to marge", "import this",
     ]):
@@ -9694,7 +12116,18 @@ def _select_action_for_chat_command(
     if not actions:
         return None
     scored = sorted(((_action_command_score(action, lower, operation), action) for action in actions), key=lambda item: item[0], reverse=True)
-    return scored[0][1] if scored and scored[0][0] > 0 else actions[0]
+    if not scored:
+        return None
+    best_score, best_action = scored[0]
+    generic_reference = _action_text_has(lower, ["first", "top", "next", "this", "that", "it", "item", "approval", "action", "reminder"])
+    specific_terms = _specific_action_reference_terms(lower)
+    if specific_terms and not _action_text_matches_specific_reference(best_action, specific_terms):
+        return None
+    if specific_terms:
+        return best_action
+    if generic_reference or best_score > 9:
+        return best_action
+    return None
 
 
 def _action_id_from_chat(lower: str) -> Optional[int]:
@@ -9714,6 +12147,8 @@ def _action_command_score(action: AssistantAction, lower: str, operation: str) -
         score += 8
     if operation == "approve" and action.status == "pending":
         score += 8
+    if operation == "reschedule" and action.action_type == "pastoral_reminder":
+        score += 8
     if _action_text_has(lower, ["first", "top", "next", "this", "that", "it"]):
         score += 2
     keyword_groups = [
@@ -9723,11 +12158,42 @@ def _action_command_score(action: AssistantAction, lower: str, operation: str) -
         (["inbox"], ["email_triage", "inbox"]),
         (["person", "add to marge", "import"], ["person_review", "person"]),
         (["meeting", "calendar", "prep", "event"], ["meeting_prep", "calendar_block", "calendar", "event"]),
+        (["reminder", "pastoral reminder"], ["pastoral_reminder", "reminder"]),
+        (["reschedule", "move", "change", "push"], ["pastoral_reminder", "reminder"]),
     ]
     for triggers, targets in keyword_groups:
         if _action_text_has(lower, triggers) and any(target in text for target in targets):
             score += 5
     return score
+
+
+def _specific_action_reference_terms(lower: str) -> List[str]:
+    stop_words = {
+        "add", "ahead", "approve", "approved", "approval", "approvals", "can", "cancel", "cancelled", "canceled", "could", "create",
+        "change", "complete", "completed", "dismiss", "done", "draft", "email", "execute", "first", "for", "from", "gmail", "good",
+        "ignore", "import", "item", "looks", "marge", "mark", "message", "next", "outlook", "please",
+        "push", "queue", "reply", "reschedule", "review", "send", "skip", "snooze", "that", "the", "this", "to", "top", "move", "what", "which",
+        "one", "two", "three", "four", "today", "tomorrow", "week", "weeks", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    }
+    terms: List[str] = []
+    for token in re.findall(r"[a-z0-9][a-z0-9'-]*", lower):
+        normalized = token.strip("'")
+        if len(normalized) < 3 or normalized in stop_words:
+            continue
+        terms.append(normalized)
+    return sorted(set(terms))
+
+
+def _action_text_matches_specific_reference(action: AssistantAction, terms: List[str]) -> bool:
+    text = " ".join([
+        action.title or "",
+        action.description or "",
+        action.action_type or "",
+        action.source or "",
+        action.external_provider or "",
+        json.dumps(_json_loads(action.payload_json), default=str),
+    ]).lower()
+    return all(_action_text_has(text, [term]) for term in terms)
 
 
 def _action_execution_reply(action: AssistantAction, execution: Optional[dict]) -> str:
@@ -9746,6 +12212,8 @@ def _action_execution_reply(action: AssistantAction, execution: Optional[dict]) 
     if kind == "local_member_upsert":
         verb = "Created" if execution.get("created") else "Updated"
         return f"{verb} local Marge people memory for {execution.get('member_name') or action.title}. I did not write back to the source system."
+    if kind == "pastoral_reminder_completed":
+        return f"Marked done: {action.title}."
     return f"Marked done: {action.title}."
 
 
@@ -9754,7 +12222,16 @@ def _execute_local_action(db: Session, action: AssistantAction, account: Optiona
         return _execute_person_review_action(db, action, account)
     if action.action_type == "email_triage":
         return _execute_email_triage_action(db, action, account)
+    if action.action_type == "pastoral_reminder":
+        return {
+            "kind": "pastoral_reminder_completed",
+            "completed_at": datetime.utcnow().isoformat(),
+        }
     return None
+
+
+def _action_can_execute_without_approval(action: AssistantAction) -> bool:
+    return action.action_type == "pastoral_reminder" and not action.external_provider and action.status == "pending"
 
 
 def _execute_approved_action(
@@ -9763,10 +12240,10 @@ def _execute_approved_action(
     account: Optional[ChurchAccount] = None,
     user: Optional[AccountUser] = None,
 ) -> Optional[dict]:
-    if action.status != "approved":
+    if action.status != "approved" and not _action_can_execute_without_approval(action):
         raise HTTPException(status_code=409, detail="Approve this action before execution.")
     if action.external_provider:
-        _ensure_external_write_allowed(db, action, account)
+        _ensure_external_write_allowed(db, action, account, user)
         execution = _execute_external_action(db, action, account, user)
     else:
         execution = _execute_local_action(db, action, account)
@@ -9908,7 +12385,7 @@ def _person_names_from_payload(person: dict) -> tuple[Optional[str], Optional[st
     first = _clean(person.get("first_name"))
     last = _clean(person.get("last_name"))
     if first:
-        return first, last or "Unknown"
+        return first, last or ""
     name = _clean(person.get("name"))
     if not name:
         return None, None
@@ -9928,7 +12405,7 @@ def _find_existing_member_for_person(
         existing = query.filter(Member.email.ilike(email)).first()
         if existing:
             return existing
-    if first_name and last_name and last_name != "Unknown":
+    if first_name and last_name:
         existing = query.filter(Member.first_name.ilike(first_name), Member.last_name.ilike(last_name)).first()
         if existing:
             return existing
@@ -10253,19 +12730,34 @@ def _breeze_api_config(db: Optional[Session], account: Optional[ChurchAccount] =
     }
 
 
+def _rock_server_api_key() -> Optional[str]:
+    return os.getenv("ROCK_API_KEY") or os.getenv("ROCK_HALLMARK_API_KEY")
+
+
 def _rock_api_config(db: Optional[Session], account: Optional[ChurchAccount] = None) -> dict:
     payload = _api_key_payload(db, "rock", account)
     return {
-        "api_key": payload.get("api_key") or os.getenv("ROCK_HALLMARK_API_KEY"),
+        "api_key": payload.get("api_key") or _rock_server_api_key(),
         "base_url": payload.get("base_url") or os.getenv("ROCK_BASE_URL"),
     }
 
 
+def _rock_missing_config(config: dict) -> List[str]:
+    missing = []
+    if not config.get("api_key"):
+        missing.append("ROCK_API_KEY")
+    if not config.get("base_url"):
+        missing.append("ROCK_BASE_URL")
+    elif not _valid_https_base_url(config.get("base_url")):
+        missing.append("ROCK_BASE_URL")
+    return missing
+
+
 def _api_key_provider_has_env(provider: str) -> bool:
     if provider == "breeze":
-        return bool(os.getenv("BREEZE_API_KEY") and os.getenv("BREEZE_BASE_URL"))
+        return bool(os.getenv("BREEZE_API_KEY") and _valid_https_base_url(os.getenv("BREEZE_BASE_URL")))
     if provider == "rock":
-        return bool(os.getenv("ROCK_HALLMARK_API_KEY"))
+        return bool(_rock_server_api_key() and _valid_https_base_url(os.getenv("ROCK_BASE_URL")))
     return False
 
 
@@ -10331,27 +12823,30 @@ def _integration_statuses(
             status = "configured" if auth_type in {"api_key", "env_api_key"} else "connected"
         elif provider == "mcp":
             status = "available"
-        elif provider == "breeze" and _api_key_provider_has_env(provider):
+        elif provider in {"breeze", "rock"} and _api_key_provider_has_env(provider):
             status = "configured"
         elif user and auth_type == "oauth":
             status = "needs_authorization"
         elif record and record.status in {"connected", "synced"}:
             status = "connected"
-        elif provider != "breeze" and env_var and os.getenv(env_var):
+        elif provider not in {"breeze", "rock"} and env_var and os.getenv(env_var):
             status = "configured"
         elif record:
             status = record.status
         else:
             status = "planned" if provider not in {"rock"} else "needs_configuration"
         scope_list = _scopes_to_list(credential.scopes if credential else (record.scopes if record else None), scopes)
-        verified_at = credential.verified_at if credential else (record.verified_at if record and status in {"connected", "configured", "available"} else None)
+        if provider == "mcp":
+            verified_at = None
+        else:
+            verified_at = credential.verified_at if credential else (record.verified_at if record and status in {"connected", "configured", "available"} else None)
         result.append(IntegrationStatus(
             provider=provider,
             display_name=record.display_name if record else display,
             status=status,
             auth_type=record.auth_type if record else auth_type,
             scopes=scope_list,
-            secure_note="Secrets and OAuth tokens are never returned to the browser or chat.",
+            secure_note="Secrets, API keys, and OAuth tokens are never returned to the browser or chat.",
             config_hint=_integration_config_hint(definition, record, credential, user),
             last_synced_at=record.last_synced_at if record else None,
             connected_at=record.connected_at if record else None,
@@ -10377,10 +12872,10 @@ def _integration_definitions() -> List[dict]:
             "display_name": "Rock RMS",
             "auth_type": "env_api_key",
             "scopes": ["members", "attendance", "notes"],
-            "env_var": "ROCK_HALLMARK_API_KEY",
+            "env_var": "ROCK_API_KEY",
             "instructions": [
                 "Create a Rock API key with the narrowest read permissions Marge needs.",
-                "Paste it only into secure connector setup or set ROCK_HALLMARK_API_KEY on the server; never put it in chat.",
+                "Paste it only into secure connector setup or set ROCK_API_KEY and ROCK_BASE_URL on the server; never put secrets in chat.",
                 "Marge stores workspace API keys encrypted server-side and never returns them to the browser.",
                 "Run sync only after confirming the church account and permissions.",
             ],
@@ -10519,10 +13014,11 @@ def _start_integration(
                 missing.append("BREEZE_API_KEY")
             if not config.get("base_url"):
                 missing.append("BREEZE_BASE_URL")
+            elif not _valid_https_base_url(config.get("base_url")):
+                missing.append("BREEZE_BASE_URL")
         elif provider == "rock":
             config = _rock_api_config(db, account)
-            if not config.get("api_key"):
-                missing.append(definition.get("env_var") or "ROCK_HALLMARK_API_KEY")
+            missing.extend(_rock_missing_config(config))
         else:
             env_var = definition.get("env_var")
             if env_var and not os.getenv(env_var):
@@ -10561,29 +13057,33 @@ def _integration_config_hint(
     credential: Optional[IntegrationCredential],
     user: Optional[AccountUser] = None,
 ) -> str:
+    provider = definition["provider"]
+    if provider == "mcp":
+        return "Local agent bridge only. MCP lets LLM clients call Marge; it does not connect a church tool or count as live provider readiness."
     if credential:
         if definition["auth_type"] in {"api_key", "env_api_key"}:
             return f"Workspace {definition['display_name']} API-key credentials are encrypted server-side. Use Check credentials before syncing ministry data."
         scope = "workspace user" if credential.user_id else "workspace"
+        check_note = "" if credential.verified_at else " Use Check credentials before syncing ministry data."
         if credential.expires_at:
-            return f"Connected for this {scope} with encrypted OAuth tokens. Access token expires {_date_label(credential.expires_at)}."
-        return f"Connected for this {scope} with encrypted OAuth tokens. Refresh token status is stored server-side only."
+            return f"Connected for this {scope} with encrypted OAuth tokens. Access token expires {_date_label(credential.expires_at)}.{check_note}"
+        return f"Connected for this {scope} with encrypted OAuth tokens. Refresh token status is stored server-side only.{check_note}"
     if record and record.config_hint:
         if user and definition["auth_type"] == "oauth":
             return "Authorize this connector for the current Marge user before syncing or writing through it."
         return record.config_hint
-    provider = definition["provider"]
     env_var = definition.get("env_var")
-    if provider == "mcp":
-        return "Run the local MCP server."
     if provider == "breeze":
         missing = [name for name in ["BREEZE_API_KEY", "BREEZE_BASE_URL"] if not os.getenv(name)]
+        if os.getenv("BREEZE_BASE_URL") and not _valid_https_base_url(os.getenv("BREEZE_BASE_URL")):
+            missing.append("BREEZE_BASE_URL")
         if missing:
             return f"Add Breeze API key and base URL in secure setup, or set {', '.join(missing)} server-side."
         return "Ready to sync Breeze people and events from the server-side API key."
     if provider == "rock":
-        if not os.getenv("ROCK_HALLMARK_API_KEY"):
-            return "Add a Rock API key in secure setup, or set ROCK_HALLMARK_API_KEY server-side."
+        missing = _rock_missing_config(_rock_api_config(None, None))
+        if missing:
+            return "Add a Rock API key and API base URL in secure setup, or set ROCK_API_KEY and ROCK_BASE_URL server-side."
         return "Ready to sync Rock people and attendance from the server-side API key."
     if definition["auth_type"] == "oauth":
         missing = _missing_oauth_config(definition)
@@ -10839,17 +13339,7 @@ def _setup_steps(profile: PastorProfile, integrations: List[IntegrationStatus], 
         if sync_ready and integration.verified_at:
             continue
         if sync_ready:
-            steps.append(DeskItem(
-                id=f"setup-integration-verify-{provider}",
-                type="integration_setup",
-                title=f"Check {integration.display_name} credentials",
-                subtitle=f"Marge can see this connector, but has not verified access for {_profile_tools_label(profile)}.",
-                detail="Credential checks confirm access without importing people, email, calendar, or attendance context.",
-                priority="high" if provider in {"google_workspace", "planning_center", "rock", "microsoft_365"} else "medium",
-                action="Check credentials",
-                source="integrations",
-                provider=provider,
-            ))
+            steps.append(_integration_check_credentials_step(integration, profile))
             continue
         steps.append(DeskItem(
             id=f"setup-integration-{provider}",
@@ -10870,13 +13360,27 @@ def _setup_steps(profile: PastorProfile, integrations: List[IntegrationStatus], 
                 id="setup-integration-first-tool",
                 type="integration_setup",
                 title="Connect the first ministry tool",
-                subtitle="Start with Google Workspace, Planning Center, Rock RMS, or Breeze.",
+                subtitle="Start with Google Workspace, Microsoft 365, Planning Center, Rock RMS, or Breeze.",
                 detail="Marge can do more once she reads from the systems the church already trusts.",
                 priority="medium",
                 action="Open integrations",
                 source="integrations",
             ))
     return steps[:5]
+
+
+def _profile_question_desk_item(question: dict) -> DeskItem:
+    field = question.get("field") or "context"
+    return DeskItem(
+        id=f"setup-profile-{field}",
+        type="profile_setup",
+        title=f"Teach Marge: {_profile_field_label(field)}",
+        subtitle=question.get("question") or "Add the next piece of ministry context.",
+        detail=question.get("why") or "This lets Marge prioritize and draft in a way that fits this pastor and church.",
+        priority="high",
+        action="Answer context question",
+        source="profile",
+    )
 
 
 def _interview_question(profile: PastorProfile) -> Optional[dict]:
@@ -10897,6 +13401,7 @@ def _interview_question(profile: PastorProfile) -> Optional[dict]:
         "faith_tradition": "Drafts should respect this church's theological vocabulary and language boundaries.",
         "followup_pain": "Marge should start where people are most likely to slip through cracks.",
         "ministry_priorities": "Marge should know what a useful first month should move for this pastor.",
+        "support_preferences": "Marge should learn how this pastor wants to be nudged, protected, and helped when ministry pressure rises.",
         "tools_in_use": "Secure connector setup depends on the systems the church already trusts.",
         "communication_style": "Drafts should sound like the pastor, not like generic automation.",
         "weekly_rhythm": "Marge needs to protect real sermon, care, rest, and meeting rhythms before proposing calendar work.",
@@ -10917,6 +13422,7 @@ def _contextual_interview_copy(profile: PastorProfile, field: str, question: dic
     size = _short_context(profile.congregation_size, 40)
     context = _short_context(profile.church_context, 100)
     pain = _short_context(profile.followup_pain, 120)
+    priority = _short_context(profile.ministry_priorities, 120)
     tools = _short_context(profile.tools_in_use, 100)
     voice = _short_context(profile.communication_style, 80)
     copy = {}
@@ -10944,13 +13450,18 @@ def _contextual_interview_copy(profile: PastorProfile, field: str, question: dic
         copy["question"] = f"What would make Marge genuinely helpful in the first month with {basis.lower()}?"
         copy["placeholder"] = "Close loops with first-time guests, protect sermon prep, follow up on private prayer needs..."
         copy["why"] = "Marge should aim setup, drafts, and connector work at the ministry outcome that matters first."
+    elif field == "support_preferences":
+        basis = priority or pain or role or f"serving {church}"
+        copy["question"] = f"How should Marge support you personally while helping with {basis.lower()}?"
+        copy["placeholder"] = "Nudge me gently, protect my rest, surface what I am likely to miss, keep me from carrying every loop alone..."
+        copy["why"] = "Marge should learn the pastor's preferred support style, not only the church's tools and tasks."
     elif field == "tools_in_use":
         if pain:
             copy["question"] = f"What tools does {church} already use for {pain.lower()}?"
             copy["why"] = "Marge should connect the systems that already hold the follow-up work you named."
         else:
             copy["question"] = f"What tools does {church} already use for people, email, calendar, or follow-up?"
-        copy["placeholder"] = "Planning Center, Google Workspace, Rock RMS, Outlook, Breeze..."
+        copy["placeholder"] = "Planning Center, Gmail/Google Workspace, Outlook/Microsoft 365, Rock RMS, Breeze..."
     elif field == "communication_style":
         if pain:
             copy["question"] = f"When Marge drafts around {pain.lower()}, how should she sound in your voice?"
@@ -11016,6 +13527,15 @@ def _operating_plan(
             "title": "Work toward the stated ministry priority",
             "detail": ministry_priority,
             "action": "Use setup, drafts, and connector syncs to move this first.",
+            "status": "ready",
+        })
+
+    support_preferences = _clean(profile.support_preferences)
+    if support_preferences:
+        plan.append({
+            "title": "Support the pastor personally",
+            "detail": support_preferences,
+            "action": "Shape nudges, summaries, and follow-up pressure around this support style.",
             "status": "ready",
         })
 
@@ -11099,7 +13619,7 @@ def _operating_plan(
             "status": "needs_setup",
         })
 
-    return _dedupe_plan(plan)[:5]
+    return _dedupe_plan(plan)[:8]
 
 
 def _recommended_provider_statuses(profile: PastorProfile, integrations: List[IntegrationStatus]) -> List[dict]:
@@ -11133,11 +13653,83 @@ def _recommended_providers(profile: PastorProfile) -> List[str]:
         ("breeze", ["breeze"]),
         ("microsoft_365", ["microsoft 365", "office 365", "outlook"]),
     ]
-    providers = []
-    for provider, needles in mapping:
-        if any(needle in tools for needle in needles):
-            providers.append(provider)
-    return providers
+    matches = []
+    for rank, (provider, needles) in enumerate(mapping):
+        positions = [tools.find(needle) for needle in needles if needle in tools]
+        if positions:
+            matches.append((provider, min(positions), rank))
+    scores = _connector_context_scores(profile)
+    matches.sort(key=lambda item: (-scores.get(item[0], 0), item[1], item[2]))
+    return [provider for provider, _position, _rank in matches]
+
+
+def _connector_context_scores(profile: PastorProfile) -> dict[str, int]:
+    context = " ".join(
+        _clean(value) or ""
+        for value in [profile.followup_pain, profile.ministry_priorities, profile.church_context]
+    ).lower()
+    scores = {
+        "google_workspace": 0,
+        "microsoft_365": 0,
+        "planning_center": 0,
+        "rock": 0,
+        "breeze": 0,
+    }
+    if not context:
+        return scores
+    if _mentions(context, [
+        "follow-up",
+        "follow up",
+        "reply",
+        "draft",
+        "email",
+        "inbox",
+        "message",
+        "prayer card",
+        "prayer request",
+    ]):
+        scores["google_workspace"] += 24
+        scores["microsoft_365"] += 24
+        scores["planning_center"] += 8
+        scores["rock"] += 6
+        scores["breeze"] += 6
+    if _mentions(context, [
+        "attendance",
+        "absent",
+        "absence",
+        "care",
+        "hospital",
+        "grief",
+        "member",
+        "people",
+        "group",
+        "volunteer",
+        "serve",
+    ]):
+        scores["planning_center"] += 30
+        scores["rock"] += 30
+        scores["breeze"] += 30
+        scores["google_workspace"] += 8
+        scores["microsoft_365"] += 8
+    if _mentions(context, [
+        "visitor",
+        "first-time guest",
+        "first time guest",
+        "guest",
+        "new family",
+        "new families",
+    ]):
+        scores["google_workspace"] += 18
+        scores["microsoft_365"] += 18
+        scores["planning_center"] += 12
+        scores["rock"] += 10
+        scores["breeze"] += 10
+    if _mentions(context, ["calendar", "schedule", "meeting", "appointment", "visit"]):
+        scores["google_workspace"] += 12
+        scores["microsoft_365"] += 12
+        scores["planning_center"] += 10
+        scores["breeze"] += 8
+    return scores
 
 
 def _provider_from_chat(lower: str) -> Optional[str]:
@@ -11157,13 +13749,40 @@ def _provider_from_chat(lower: str) -> Optional[str]:
 def _connector_setup_requested(lower: str) -> bool:
     if not _connector_setup_verb_requested(lower):
         return False
-    if _mentions(lower, ["integration", "integrations", "connector", "connectors", "tools", "planning center", "rock", "gmail", "google", "outlook", "microsoft", "breeze"]):
+    if _mentions(lower, [
+        "integration",
+        "integrations",
+        "connector",
+        "connectors",
+        "tools",
+        "church tool",
+        "church tools",
+        "ministry tool",
+        "ministry tools",
+        "email",
+        "mail",
+        "mailbox",
+        "inbox",
+        "calendar",
+        "schedule",
+        "planning center",
+        "rock",
+        "gmail",
+        "google",
+        "outlook",
+        "microsoft",
+        "breeze",
+    ]):
         return True
     return _mentions(lower, ["connect first", "what should i connect", "which should i connect", "where should i start connecting"])
 
 
 def _connector_setup_verb_requested(lower: str) -> bool:
-    return bool(re.search(r"\b(?:connect|setup|authorize)\b", lower)) or "set up" in lower
+    return (
+        bool(re.search(r"\b(?:connect|setup|authorize)\b", lower))
+        or "set up" in lower
+        or bool(re.search(r"\bstart\b.*\bsetup\b", lower))
+    )
 
 
 def _open_integrations_requested(lower: str) -> bool:
@@ -11188,6 +13807,9 @@ def _open_integrations_chat_response(
         for step in _setup_steps(profile, integrations, needs_seed_context=False)
         if step.type == "integration_setup"
     ]
+    action_steps = _dedupe_desk_items(
+        [_integration_check_credentials_step(item, profile) for item in unchecked] + setup_steps
+    )
 
     parts = []
     if ready:
@@ -11210,10 +13832,24 @@ def _open_integrations_chat_response(
         reply=reply,
         intent="integrations_opened",
         mode=effective_mode,
-        actions=setup_steps[:4],
-        suggested_prompts=["What should I connect first?", "Sync the connected tools.", "Explain the approval rules."],
+        actions=action_steps[:4],
+        suggested_prompts=_open_integrations_prompts(ready, unchecked, action_steps),
         profile=_profile_response(profile, account),
     )
+
+
+def _open_integrations_prompts(
+    ready: List[IntegrationStatus],
+    unchecked: List[IntegrationStatus],
+    action_steps: List[DeskItem],
+) -> List[str]:
+    if ready:
+        return ["Sync the connected tools.", "Show connected context.", "Explain the approval rules."]
+    if unchecked:
+        return [f"Check {unchecked[0].display_name} credentials.", "Open integrations.", "Explain the approval rules."]
+    if action_steps:
+        return [_setup_prompt(action_steps[0]), "How do secure connections work?", "Explain the approval rules."]
+    return ["What should I connect first?", "How do secure connections work?", "Explain the approval rules."]
 
 
 def _approval_rules_requested(lower: str) -> bool:
@@ -11265,6 +13901,20 @@ def _next_action_requested(lower: str) -> bool:
     ])
 
 
+def _check_on_next_requested(lower: str) -> bool:
+    return _mentions(lower, [
+        "who should i check on next",
+        "who should we check on next",
+        "who should i check on first",
+        "who should we check on first",
+        "who needs a check-in",
+        "who needs a check in",
+        "who needs follow-up next",
+        "who needs follow up next",
+        "who needs attention next",
+    ])
+
+
 def _first_week_plan_requested(lower: str) -> bool:
     return _mentions(lower, [
         "first-week plan",
@@ -11277,9 +13927,32 @@ def _first_week_plan_requested(lower: str) -> bool:
 
 
 def _connector_verification_requested(lower: str) -> bool:
-    if not _mentions(lower, ["verify", "verified", "credential", "credentials", "check", "test", "check connection", "test connection", "health check"]):
+    check_action = (
+        bool(re.search(r"\b(?:verify|verified|verification|test|tested|testing)\b", lower))
+        or bool(re.search(r"\bcheck(?:ed|ing)?\b(?!\s*(?:-| )?ins?\b)", lower))
+        or "health check" in lower
+    )
+    if not check_action:
         return False
-    return bool(_provider_from_chat(lower)) or _mentions(lower, ["integration", "integrations", "connector", "connectors", "tools"])
+    credential_or_connection_target = _mentions(lower, [
+        "credential",
+        "credentials",
+        "connection",
+        "connector",
+        "connectors",
+        "integration",
+        "integrations",
+        "access",
+        "authorization",
+        "auth",
+        "health check",
+    ])
+    if credential_or_connection_target:
+        return True
+    provider = _provider_from_chat(lower)
+    if provider:
+        return True
+    return False
 
 
 def _next_verification_provider(profile: PastorProfile, integrations: List[IntegrationStatus]) -> Optional[str]:
@@ -11311,12 +13984,15 @@ def _verification_identity_summary(identity: dict) -> str:
         ("display_name", "name"),
         ("name", "name"),
         ("id", "id"),
-        ("sample_people_access", "people access"),
+        ("people_access_confirmed", "people access"),
     ]:
         value = identity.get(key)
         if value is None or value == "":
             continue
-        parts.append(f"{label} {value}")
+        if isinstance(value, bool):
+            parts.append(f"{label} {'confirmed' if value else 'not confirmed'}")
+        else:
+            parts.append(f"{label} {value}")
     return ", ".join(parts[:3])
 
 
@@ -11329,6 +14005,7 @@ def _verify_before_sync_chat_response(
     db: Session,
     account: Optional[ChurchAccount],
     user: Optional[AccountUser],
+    profile: PastorProfile,
     user_message: str,
     mode: str,
     provider: str,
@@ -11341,15 +14018,26 @@ def _verify_before_sync_chat_response(
     try:
         verification = _verify_integration(db, provider, account, user)
     except HTTPException as verify_exc:
+        integrations = _integration_statuses(db, account, user)
+        step = _provider_setup_or_check_step(
+            profile,
+            integrations,
+            provider,
+            subtitle=f"Reconnect {display} before syncing ministry context.",
+            detail="Marge checks credentials without syncing before any people, email, calendar, or attendance context is imported.",
+        )
+        actions = [step] if step else []
+        prompts = _connector_setup_or_check_prompts(actions) or ["Open integrations.", f"Start {display} setup."]
         return _chat_turn_response(db, account, user, user_message,
             reply=(
                 f"I stopped before syncing {display} because credentials need to be checked first. "
-                f"I tried the safe credential check, but it failed: {verify_exc.detail}"
+                f"I tried the safe credential check, but it failed: {_redact_secret_text(verify_exc.detail)}. "
+                "No ministry data was imported and no actions were queued."
             ),
             intent="integration_verify_failed_before_sync",
             mode=mode,
-            actions=[],
-            suggested_prompts=["Open integrations.", f"Start {display} setup."],
+            actions=actions,
+            suggested_prompts=prompts,
         )
     identity_summary = _verification_identity_summary(verification.identity)
     reply = (
@@ -11380,6 +14068,72 @@ def _next_setup_provider(profile: PastorProfile, integrations: List[IntegrationS
     return None
 
 
+def _connector_setup_recommendation(profile: PastorProfile, provider: str, integrations: List[IntegrationStatus]) -> str:
+    display = _provider_display_name(provider)
+    evidence = []
+    tool_match = _connector_saved_tool_match(profile, provider)
+    tools = _short_context(profile.tools_in_use, 140)
+    if tool_match:
+        evidence.append(f"{tool_match} is in your saved stack")
+    elif tools:
+        evidence.append(f"your saved stack is {tools}")
+    followup = _short_context(profile.followup_pain, 130)
+    priority = _short_context(profile.ministry_priorities, 130)
+    if followup:
+        evidence.append(f"your stated follow-up burden is {followup}")
+    elif priority:
+        evidence.append(f"your first ministry priority is {priority}")
+
+    reason = _connector_provider_reason(provider)
+    next_provider = _next_recommended_provider_after(profile, integrations, provider)
+    next_sentence = f" After that, I would handle {_provider_display_name(next_provider)}." if next_provider else ""
+    if evidence:
+        return f"I would connect {display} first because {_human_join(evidence[:2])}. {reason}{next_sentence}"
+    return f"I would connect {display} first because it is the next unverified church tool. {reason}{next_sentence}"
+
+
+def _connector_saved_tool_match(profile: PastorProfile, provider: str) -> Optional[str]:
+    tools = profile.tools_in_use or ""
+    lower = tools.lower()
+    aliases = {
+        "google_workspace": [("Gmail", "gmail"), ("Google Calendar", "google calendar"), ("Google Workspace", "google workspace")],
+        "planning_center": [("Planning Center", "planning center"), ("Church Center", "church center"), ("PCO", "pco")],
+        "rock": [("Rock RMS", "rock rms"), ("Rock", "rock")],
+        "breeze": [("Breeze", "breeze")],
+        "microsoft_365": [("Outlook", "outlook"), ("Microsoft 365", "microsoft 365"), ("Office 365", "office 365")],
+    }
+    for label, needle in aliases.get(provider, []):
+        if needle in lower:
+            return label
+    return None
+
+
+def _connector_provider_reason(provider: str) -> str:
+    reasons = {
+        "google_workspace": "That gives me inbox and calendar context for reviewable follow-up drafts and protected schedule blocks.",
+        "microsoft_365": "That gives me Outlook and calendar context for reviewable follow-up drafts and protected schedule blocks.",
+        "planning_center": "That gives me people, groups, calendar, and service context from the system the church already trusts.",
+        "rock": "That gives me people, attendance, and care context from the church management system.",
+        "breeze": "That gives me people, event, and attendance context from the church management system.",
+    }
+    return reasons.get(provider, "That gives me the first real ministry context to sync securely.")
+
+
+def _next_recommended_provider_after(
+    profile: PastorProfile,
+    integrations: List[IntegrationStatus],
+    current_provider: str,
+) -> Optional[str]:
+    by_provider = {item.provider: item for item in integrations}
+    for provider in _recommended_providers(profile):
+        if provider == current_provider:
+            continue
+        status = by_provider.get(provider)
+        if status and (status.status not in {"connected", "configured", "available"} or not status.verified_at):
+            return provider
+    return None
+
+
 def _profile_tools_label(profile: PastorProfile) -> str:
     return profile.tools_in_use.strip() if profile.tools_in_use else "No tools saved yet"
 
@@ -11389,7 +14143,7 @@ def _suggested_prompts(profile: PastorProfile, priorities: List[DeskItem], setup
     if _missing_profile_fields(profile):
         return [
             "What do you still need to learn about my ministry?",
-            "How will you use this context?",
+            "How will you support me?",
             "How do secure connections work?",
         ]
     if setup_steps:
@@ -11398,14 +14152,18 @@ def _suggested_prompts(profile: PastorProfile, priorities: List[DeskItem], setup
             "Why is this the next step?",
             "Explain the approval rules.",
         ]
+    elif priorities:
+        prompts = [
+            f"What should I do for {priorities[0].title}?",
+            "What can wait until next week?",
+            "Show my approvals.",
+        ]
     else:
         prompts = [
-            "What needs my attention before noon?",
-            "Draft the replies I should review.",
-            "Where can I fit care follow-up this week?",
+            "What should I handle next?",
+            "Where should I capture the next follow-up?",
+            "Open integrations." if profile.tools_in_use else "How do secure connections work?",
         ]
-    if priorities:
-        prompts.append(f"What should I do for {priorities[0].title}?")
     return prompts
 
 
@@ -11427,19 +14185,45 @@ def _setup_prompt(step: DeskItem) -> str:
 
 def _proactive_summary(profile: PastorProfile, priorities: List[DeskItem], email_drafts: List[DeskItem], calendar_blocks: List[DeskItem], setup_steps: Optional[List[DeskItem]] = None) -> str:
     setup_steps = setup_steps or []
+    support = _proactive_support_clause(profile)
     if not _profile_is_complete(profile):
         next_step = setup_steps[0].title if setup_steps else "the next ministry-context question"
         return f"Marge needs a little more ministry context before she can feel truly personal. Start with {next_step}."
     if setup_steps:
         first = setup_steps[0]
-        return f"I know enough to start helping. Next I would {_setup_summary_phrase(first)} so I can use the tools and rhythms you already have."
+        context = _proactive_context_clause(profile)
+        return f"I know enough to start helping.{context} Next I would {_setup_summary_phrase(first)} so I can use the tools and rhythms you already have.{support}"
     if priorities:
         pain = f" I am watching the follow-up burden you named: {profile.followup_pain.strip().rstrip('.')}." if profile.followup_pain else ""
-        return f"I would start with {priorities[0].title}, keep {len(email_drafts)} draft(s) in review, and protect {len(calendar_blocks)} calendar block(s).{pain}"
-    return "No urgent people are flagged. I would protect ministry preparation time and clear the admin queue."
+        return f"I would start with {priorities[0].title}, keep {len(email_drafts)} draft(s) in review, and protect {len(calendar_blocks)} calendar block(s).{pain}{support}"
+    rhythm = _clean(profile.weekly_rhythm)
+    if rhythm:
+        return f"No current follow-up items are visible in this workspace. I would protect the rhythm you saved: {rhythm}.{support}"
+    return f"No current follow-up items are visible in this workspace. Give me the next real person, prayer request, visitor, or care update and I will keep that follow-up visible.{support}"
+
+
+def _proactive_support_clause(profile: PastorProfile) -> str:
+    support = _short_context(profile.support_preferences, 120)
+    if not support:
+        return ""
+    return f" I will support you the way you asked: {support}."
+
+
+def _proactive_context_clause(profile: PastorProfile) -> str:
+    pain = _short_context(profile.followup_pain, 120)
+    priority = _short_context(profile.ministry_priorities, 120)
+    if pain and priority:
+        return f" Because you named {pain} and want {priority},"
+    if priority:
+        return f" Because you want {priority},"
+    if pain:
+        return f" Because you named {pain},"
+    return ""
 
 
 def _morning_briefing_requested(lower: str) -> bool:
+    if _mentions(lower, ["what needs my attention", "what needs our attention", "what needs attention"]) and _mentions(lower, ["staff meeting", "before meeting", "before the meeting"]):
+        return True
     if _mentions(lower, [
         "morning briefing",
         "daily briefing",
@@ -11468,7 +14252,7 @@ def _morning_briefing_chat_response(
     effective_mode: Literal["demo", "live"],
     account: Optional[ChurchAccount],
 ) -> AssistantChatResponse:
-    pastor = _profile_pastor_name(profile)
+    pastor = pastor_display_name(_profile_pastor_name(profile))
     actions: List[DeskItem] = []
 
     if not _profile_is_complete(profile):
@@ -11491,11 +14275,12 @@ def _morning_briefing_chat_response(
         )
 
     seed_step = next((step for step in setup_steps if step.type == "data_seed"), None)
+    support = _proactive_support_clause(profile)
     if seed_step and not priorities:
         reply = (
             f"Good morning, {pastor}. The honest briefing is that I still need the first real ministry record before I can sort people for today. "
             f"I would start with {seed_step.title}: {seed_step.subtitle or seed_step.detail or seed_step.action}. "
-            "After that I can keep visitor, care, prayer, and follow-up work in front of you without using placeholder people."
+            f"After that I can keep visitor, care, prayer, and follow-up work in front of you without inventing people or pretending the desk is already full.{support}"
         )
         return AssistantChatResponse(
             reply=reply,
@@ -11515,6 +14300,7 @@ def _morning_briefing_chat_response(
             f"Good morning, {pastor}. I do not see overdue care, visitor, prayer, or absence follow-up in the current workspace. "
             "I would protect ministry preparation time and keep watching for new people or prayer needs."
         )
+    reply += support
 
     if pending_actions:
         review_line = "; ".join(f"{action.title} ({action.status})" for action in pending_actions[:3])
@@ -11623,12 +14409,12 @@ def _defer_until_next_week_response(
 
     integration_steps = [step for step in setup_steps if step.type == "integration_setup"]
     if integration_steps:
-        can_wait.append("new connector syncs that are not needed for today's care; keep them in secure setup/check/sync order")
+        can_wait.append("new connector syncs that are not needed for today's people or prayer follow-up; keep them in secure setup/check/sync order")
     if calendar_blocks:
         can_wait.append("turning a proposed block into an external calendar event until you approve the exact item")
     if email_drafts and not any(item.type in {"visitor", "care", "prayer"} for item in urgent_priorities):
         can_wait.append("non-urgent draft polishing after the people most likely to be missed are handled")
-    can_wait.append("lower-priority admin cleanup that is not tied to a real visitor, care case, private prayer request, or approved send")
+    can_wait.append("work that is not tied to a real visitor, care case, private prayer request, absence check-in, or approved external action")
 
     if not do_not_defer:
         do_not_defer.append("I do not see a named care, visitor, prayer, or approval item that must be handled before next week")
@@ -11641,6 +14427,7 @@ def _defer_until_next_week_response(
         + "; ".join(can_wait[:4])
         + f".{rhythm} External sends, calendar writes, and church-system changes stay behind approval."
     )
+    reply += _proactive_support_clause(profile)
     return AssistantChatResponse(
         reply=reply,
         intent="defer_triage",
@@ -11695,14 +14482,17 @@ def _next_action_response(
         )
         actions = calendar_blocks[:3]
     else:
+        rhythm = _short_context(profile.weekly_rhythm, 140)
+        rhythm_sentence = f" I would protect your saved rhythm instead: {rhythm}." if rhythm else ""
         reply = (
             "I do not see a care, visitor, prayer, absence, setup, or approval item that must be handled next. "
-            "I would protect sermon prep or quiet admin time and keep watching for new ministry context."
+            f"Give me the next real ministry update and I will turn it into reviewable follow-up.{rhythm_sentence}"
         )
         actions = []
     rhythm = _short_context(profile.weekly_rhythm, 140)
-    if rhythm:
+    if rhythm and "saved rhythm" not in reply:
         reply += f" Keep your saved rhythm in view: {rhythm}."
+    reply += _proactive_support_clause(profile)
     return AssistantChatResponse(
         reply=reply,
         intent="next_action",
@@ -11713,14 +14503,135 @@ def _next_action_response(
     )
 
 
-def _default_reply(profile: PastorProfile, priorities: List[DeskItem], email_drafts: List[DeskItem], calendar_blocks: List[DeskItem]) -> str:
-    name = _profile_pastor_name(profile)
+def _check_on_next_response(
+    db: Session,
+    profile: PastorProfile,
+    priorities: List[DeskItem],
+    setup_steps: List[DeskItem],
+    pending_actions: List[AssistantAction],
+    effective_mode: Literal["demo", "live"],
+    account: Optional[ChurchAccount],
+) -> AssistantChatResponse:
+    setup_step = next((step for step in setup_steps if step.type in {"profile_setup", "data_seed"}), None)
+    if setup_step:
+        reply = (
+            f"Before I name people to check on, handle {setup_step.title}: "
+            f"{setup_step.action or setup_step.subtitle or setup_step.detail or 'add the first real ministry context'}. "
+            "That keeps me from guessing from an empty workspace."
+        )
+        actions = [setup_step]
+    else:
+        care_cases = (
+            scoped_query(db.query(CareNote), CareNote, account)
+            .filter(CareNote.status == "active")
+            .order_by(CareNote.last_contact.asc().nullsfirst(), CareNote.created_at.asc())
+            .limit(3)
+            .all()
+        )
+        prayers = (
+            scoped_query(db.query(PrayerRequest), PrayerRequest, account)
+            .filter(PrayerRequest.status == "active")
+            .order_by(PrayerRequest.is_private.desc(), PrayerRequest.updated_at.asc())
+            .limit(3)
+            .all()
+        )
+        recent_member = _recent_chat_member_context(db, account)
+        recent_actions: List[DeskItem] = []
+        if recent_member:
+            recent_care = next((case for case in care_cases if case.member_id == recent_member.id), None)
+            recent_prayer = next((prayer for prayer in prayers if prayer.member_id == recent_member.id), None)
+            if recent_care:
+                recent_actions.append(_care_desk_item(recent_care))
+            if recent_prayer:
+                recent_actions.append(_prayer_desk_item(recent_prayer))
+        actions = _dedupe_desk_items(
+            recent_actions
+            + [_care_desk_item(case) for case in care_cases]
+            + [_prayer_desk_item(prayer) for prayer in prayers]
+            + [item for item in priorities if item.type in {"visitor", "absence"}]
+        )
+        if actions:
+            first = actions[0]
+            detail = first.detail or first.subtitle or first.action or "pastoral follow-up"
+            reply = (
+                f"I would check on {first.title} next: {_short_context(detail, 140)}. "
+                "I am choosing that from current care, prayer, visitor, and absence context, not from a generic task list."
+            )
+            if pending_actions:
+                reply += f" After that, review {pending_actions[0].title} in the approval queue."
+                actions = _dedupe_desk_items(actions + [_desk_item_from_action(action) for action in pending_actions[:2]])
+        else:
+            reply = (
+                "I do not see a named care, prayer, visitor, or absence follow-up to check on yet. "
+                "Give me the next real ministry update and I will keep that person in view."
+            )
+            actions = []
+    reply += _proactive_support_clause(profile)
+    return AssistantChatResponse(
+        reply=reply,
+        intent="next_action",
+        mode=effective_mode,
+        actions=actions[:5],
+        suggested_prompts=_check_on_next_prompts(actions),
+        profile=_profile_response(profile, account),
+    )
+
+
+def _recent_chat_member_context(db: Session, account: Optional[ChurchAccount]) -> Optional[Member]:
+    rows = (
+        scoped_query(db.query(AssistantChatMessage), AssistantChatMessage, account)
+        .order_by(AssistantChatMessage.id.desc())
+        .limit(8)
+        .all()
+    )
+    for row in rows:
+        content = _chat_content(row.content)
+        if not content:
+            continue
+        member = _find_mentioned_member(db, account, content, content.lower())
+        if member:
+            return member
+    return None
+
+
+def _check_on_next_prompts(actions: List[DeskItem]) -> List[str]:
+    first = actions[0] if actions else None
+    name = _clean(first.title if first else None)
+    has_linked_name = bool(name and name not in {"Name not linked", "Member name not linked", "Visitor name not linked", "Private prayer request", "Prayer request"})
+    if first and has_linked_name:
+        if first.type == "care":
+            return [f"Draft a care follow-up for {name}.", f"Remind me to check on {name} next week.", "What can wait until next week?"]
+        if first.type == "prayer":
+            return [f"Draft a prayer follow-up for {name}.", f"What do you know about {name}?", "Show my approvals."]
+        if first.type == "absence":
+            return [f"Draft an absence check-in for {name}.", f"What do you know about {name}?", "Show my approvals."]
+    return ["Draft a care follow-up.", "Show my approvals.", "What can wait until next week?"]
+
+
+def _default_reply(
+    profile: PastorProfile,
+    priorities: List[DeskItem],
+    email_drafts: List[DeskItem],
+    calendar_blocks: List[DeskItem],
+    setup_steps: Optional[List[DeskItem]] = None,
+) -> str:
+    name = pastor_display_name(_profile_pastor_name(profile))
     if not _profile_is_complete(profile):
         missing = _missing_profile_fields(profile)
         next_question = next((q for q in ONBOARDING_QUESTIONS if q["id"] == missing[0]), ONBOARDING_QUESTIONS[0])
         return f"I can help, {name}. I still need a bit more context to serve you well: {next_question['question']}"
     if priorities:
         return f"I am with you, {name}. The first thing I would keep in view is {priorities[0].title}: {priorities[0].action or priorities[0].detail}. I also have {len(email_drafts)} draft(s) and {len(calendar_blocks)} calendar suggestion(s) ready."
+    setup_steps = setup_steps or []
+    if setup_steps:
+        first = setup_steps[0]
+        action = first.action or first.subtitle or first.detail or "take the next setup step"
+        support = _proactive_support_clause(profile)
+        return (
+            f"I am with you, {name}. The next useful step is {first.title}: {action}. "
+            "That gives me real ministry context before I treat the desk as clear, and I will keep connector syncs, sends, "
+            f"and external writes behind credential checks and approval.{support}"
+        )
     return f"I am with you, {name}. I do not see an urgent care follow-up in the current data, so I would protect your next ministry block and keep watching for new people or prayer needs."
 
 

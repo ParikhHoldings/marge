@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 def build_demo_briefing(pastor_name: str, church_name: str) -> dict:
     today = date.today()
     now = datetime.utcnow().isoformat()
+    pastor_display = _pastor_display_name(pastor_name)
 
     birthdays = [
         {
@@ -96,7 +97,7 @@ def build_demo_briefing(pastor_name: str, church_name: str) -> dict:
         'If you have ten minutes today, Maria Santos probably needs presence more than polished words.',
     ]
     ai_briefing = (
-        f"Good morning, {pastor_name}. The biggest thread to notice today is Tom Henderson — "
+        f"Good morning, {pastor_display}. The biggest thread to notice today is Tom Henderson — "
         "his job loss and his recent absence probably belong to the same burden, so he would be worth a personal call, not just a quick text. "
         "Maria Santos still feels like the most tender care situation on your list; her daughter leaving soon may make the grief feel sharper again. "
         "David Park's surgery is close enough now that a simple check-in this weekend would probably steady him. "
@@ -105,7 +106,7 @@ def build_demo_briefing(pastor_name: str, church_name: str) -> dict:
     )
 
     plain_text = "\n".join([
-        f"Good morning, Pastor {pastor_name}. Here are your people for today.",
+        f"Good morning, {pastor_display}. Here are your people for today.",
         "",
         "🎂 BIRTHDAYS THIS WEEK",
         "• Tom Henderson — birthday in two days",
@@ -132,7 +133,7 @@ def build_demo_briefing(pastor_name: str, church_name: str) -> dict:
     ])
 
     return {
-        "greeting": f"Good morning, Pastor {pastor_name}. Here are your people for today.",
+        "greeting": f"Good morning, {pastor_display}. Here are your people for today.",
         "pastor_name": pastor_name,
         "church_name": church_name,
         "generated_at": now,
@@ -154,3 +155,12 @@ def build_demo_briefing(pastor_name: str, church_name: str) -> dict:
             "prayer_requests": 1,
         },
     }
+
+
+def _pastor_display_name(pastor_name: str) -> str:
+    cleaned = (pastor_name or "").strip()
+    if not cleaned:
+        return "Pastor"
+    if cleaned.lower() == "pastor" or cleaned.lower().startswith("pastor "):
+        return cleaned
+    return f"Pastor {cleaned}"

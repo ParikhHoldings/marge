@@ -222,6 +222,20 @@ def main() -> None:
 
         return FakeResponse()
 
+    def fake_google_get_failure(url: str, headers: dict | None = None, **kwargs) -> Any:
+        assert_true(url == "https://gmail.googleapis.com/gmail/v1/users/me/profile", "Failed Google verification should still use Gmail's profile endpoint.")
+        assert_true((headers or {}).get("Authorization") == "Bearer access-token-secret-smoke", "Failed Google verification should still use the decrypted bearer token.")
+
+        class FakeResponse:
+            ok = False
+            status_code = 503
+
+            @staticmethod
+            def json() -> dict:
+                return {"error": "temporarily_unavailable"}
+
+        return FakeResponse()
+
     try:
         with TestClient(app) as client:
             config = request_json(client, "GET", "/assistant/config")
@@ -231,18 +245,45 @@ def main() -> None:
             assert_true(unauthenticated.status_code == 401, "Strict account-token mode should reject missing-token desk access.")
             assert_true("account token is required" in unauthenticated.text.lower(), "Missing-token rejection should be explicit.")
 
+            original_token_requirement = os.environ.get("MARGE_REQUIRE_ACCOUNT_TOKEN")
+            os.environ["MARGE_REQUIRE_ACCOUNT_TOKEN"] = "false"
+            try:
+                relaxed_connector_setup = client.post("/assistant/integrations/google_workspace/start", json={})
+                assert_true(
+                    relaxed_connector_setup.status_code == 401,
+                    "Connector setup should still require a real workspace even when local legacy token mode is relaxed.",
+                )
+                assert_true(
+                    "workspace" in relaxed_connector_setup.text.lower(),
+                    "Unscoped connector setup rejection should tell the operator to create or reconnect a workspace.",
+                )
+                relaxed_rock_sync = client.post("/members/sync/rock", json={})
+                assert_true(
+                    relaxed_rock_sync.status_code == 401,
+                    "Legacy Rock sync should not run against unscoped rows even when local legacy token mode is relaxed.",
+                )
+                assert_true(
+                    "workspace" in relaxed_rock_sync.text.lower(),
+                    "Unscoped legacy Rock sync rejection should mention the workspace requirement.",
+                )
+            finally:
+                if original_token_requirement is None:
+                    os.environ.pop("MARGE_REQUIRE_ACCOUNT_TOKEN", None)
+                else:
+                    os.environ["MARGE_REQUIRE_ACCOUNT_TOKEN"] = original_token_requirement
+
             signup = request_json(
                 client,
                 "POST",
                 "/assistant/signup",
-                json={"pastor_name": "Pastor OAuth Smoke", "church_name": "OAuth Smoke Church"},
+                json={"pastor_name": "Pastor OAuth Smoke", "church_name": "OAuth Smoke Church", "email": "oauth-smoke@example.test"},
             )
             token = signup["token"]
             account_ids.append(signup["account_id"])
             assert_true(signup["current_user"]["role"] == "owner", "Signup should return an owner-scoped user token.")
             account_response = request_json(client, "GET", "/assistant/account", token=token)
             assert_true(account_response["current_role"] == "owner", "Owner user token should resolve to owner access.")
-            assert_true(account_response["current_user"]["email"] is None, "Smoke signup without email should still create a current user.")
+            assert_true(account_response["current_user"]["email"] == "oauth-smoke@example.test", "Signup should preserve the owner recovery email.")
             unknown_sync = client.post(
                 "/assistant/integrations/not_a_provider/sync",
                 headers={"X-Marge-Account-Token": token},
@@ -258,6 +299,71 @@ def main() -> None:
             assert_true(mcp_sync.status_code == 422, "MCP should be listed but not treated as an external data sync source.")
             assert_true("does not import external ministry data" in mcp_sync.text.lower(), "MCP sync rejection should give capability guidance.")
             assert_true("not implemented" not in mcp_sync.text.lower(), "Connector capability errors should not leak placeholder wording.")
+            mcp_verify = request_json(
+                client,
+                "POST",
+                "/assistant/integrations/mcp/verify",
+                token=token,
+                json={},
+            )
+            assert_true(mcp_verify["status"] == "bridge_available", "MCP verification should report bridge availability, not provider credentials.")
+            assert_true(
+                "not a church-tool credential check" in mcp_verify["message"],
+                "MCP verification should not read as external provider credential proof.",
+            )
+            assert_true(
+                "does not prove an external provider is connected" in mcp_verify["message"],
+                "MCP verification should say it does not count as live provider readiness.",
+            )
+            assert_true("credentials verified" not in mcp_verify["message"].lower(), "MCP verification should not use credential-verified wording.")
+            assert_true(mcp_verify["verified_at"] is None, "MCP verification should not return a credential verification timestamp.")
+            mcp_restore: dict[str, Any] | None = None
+            mcp_stale_created = False
+            db = SessionLocal()
+            try:
+                mcp_connection = db.query(IntegrationConnection).filter(IntegrationConnection.provider == "mcp").one_or_none()
+                if mcp_connection:
+                    mcp_restore = {
+                        "account_id": mcp_connection.account_id,
+                        "display_name": mcp_connection.display_name,
+                        "status": mcp_connection.status,
+                        "auth_type": mcp_connection.auth_type,
+                        "config_hint": mcp_connection.config_hint,
+                        "verified_at": mcp_connection.verified_at,
+                    }
+                else:
+                    mcp_connection = IntegrationConnection(provider="mcp", display_name="MCP", status="connected", auth_type="local")
+                    db.add(mcp_connection)
+                    mcp_stale_created = True
+                mcp_connection.account_id = signup["account_id"]
+                mcp_connection.display_name = "MCP"
+                mcp_connection.status = "connected"
+                mcp_connection.auth_type = "local"
+                mcp_connection.config_hint = "Verified MCP credentials without syncing ministry data."
+                mcp_connection.verified_at = datetime.now(UTC).replace(tzinfo=None)
+                db.commit()
+            finally:
+                db.close()
+            try:
+                integrations_after_mcp_verify = request_json(client, "GET", "/assistant/integrations", token=token)
+                mcp_status = next(item for item in integrations_after_mcp_verify if item["provider"] == "mcp")
+                assert_true(mcp_status["verified_at"] is None, "MCP bridge checks should not mark MCP as a verified church-tool connector.")
+                assert_true(
+                    "does not connect a church tool" in mcp_status["config_hint"],
+                    "MCP integration status should keep the agent-bridge boundary visible.",
+                )
+            finally:
+                db = SessionLocal()
+                try:
+                    mcp_connection = db.query(IntegrationConnection).filter(IntegrationConnection.provider == "mcp").one_or_none()
+                    if mcp_connection and mcp_stale_created:
+                        db.delete(mcp_connection)
+                    elif mcp_connection and mcp_restore:
+                        for field, value in mcp_restore.items():
+                            setattr(mcp_connection, field, value)
+                    db.commit()
+                finally:
+                    db.close()
             session = request_json(client, "POST", "/assistant/sessions", token=token, json={"duration_hours": 2})
             session_token = session["token"]
             assert_true(session["token_type"] == "session", "User token should mint a shorter-lived session token.")
@@ -490,6 +596,7 @@ def main() -> None:
             assert_true(callback.status_code == 200, f"OAuth callback should succeed: {callback.text}")
             assert_true("access-token-secret-smoke" not in callback.text, "Callback page must not expose the access token.")
             assert_true("refresh-token-secret-smoke" not in callback.text, "Callback page must not expose the refresh token.")
+            assert_true("Check credentials before syncing ministry data" in callback.text, "Callback page should tell pastors to check credentials before sync.")
 
             integrations = request_json(client, "GET", "/assistant/integrations", token=token)
             google = next(item for item in integrations if item["provider"] == "google_workspace")
@@ -500,6 +607,10 @@ def main() -> None:
             assert_true(not google["write_enabled"], "Google writeback should stay disabled by default.")
             assert_true(google["require_approval"], "Google policy should require pastor approval by default.")
             assert_true(google["verified_at"] is None, "OAuth callback should not mark Google ready to sync until credentials are checked.")
+            assert_true(
+                "check credentials before syncing ministry data" in google["config_hint"].lower(),
+                "Unverified OAuth connector status should keep the credential-check boundary visible.",
+            )
             desk_after_callback = request_json(client, "GET", "/assistant/desk?mode=auto", token=token)
             assert_true(
                 desk_after_callback.get("stats", {}).get("connectors") == 0,
@@ -522,6 +633,83 @@ def main() -> None:
                 "credential check" in connector_status_chat["reply"].lower(),
                 "Unverified connected tools should point to credential checks before readiness.",
             )
+            unverified_connect_chat = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "Connect Google Workspace.", "mode": "live"},
+            )
+            unverified_connect_titles = {action.get("title") for action in unverified_connect_chat.get("actions", [])}
+            assert_true(
+                unverified_connect_chat["intent"] == "integration_setup_started",
+                "Chat connector setup should stay actionable after OAuth callback.",
+            )
+            assert_true(
+                "check credentials before syncing ministry data" in unverified_connect_chat["reply"].lower(),
+                "Chat connector setup should point unchecked OAuth connectors to credential verification.",
+            )
+            assert_true(
+                "Check Google Workspace credentials" in unverified_connect_titles,
+                "Chat connector setup should attach a Check credentials card for unchecked OAuth connectors.",
+            )
+            assert_true(
+                "Sync Google Workspace." not in (unverified_connect_chat.get("suggested_prompts") or []),
+                "Unchecked connector setup should not suggest sync before credentials are checked.",
+            )
+            unverified_calendar_help = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "What calendar details do you need?", "mode": "live"},
+            )
+            unverified_calendar_reply = unverified_calendar_help["reply"]
+            unverified_calendar_titles = {action.get("title") for action in unverified_calendar_help.get("actions", [])}
+            assert_true(
+                unverified_calendar_help["intent"] == "calendar_event_details_help",
+                "Calendar details help should stay available after OAuth callback.",
+            )
+            assert_true(
+                "credential-checked google workspace or microsoft 365 calendar" in unverified_calendar_reply.lower(),
+                "Unverified OAuth calendars should not be described as write-ready.",
+            )
+            unverified_calendar_text = json.dumps(unverified_calendar_help).lower()
+            assert_true(
+                "marcus" not in unverified_calendar_text and "example.test" not in unverified_calendar_text,
+                "Calendar help should avoid fake person names and test email addresses in pastor-facing guidance.",
+            )
+            assert_true(
+                "your connected google workspace calendar can stage" not in unverified_calendar_reply.lower(),
+                "Calendar help should not claim unverified Google can stage writeback work.",
+            )
+            assert_true(
+                "Check Google Workspace credentials" in unverified_calendar_titles,
+                "Unverified Google calendar help should return a credential-check setup card.",
+            )
+            unverified_calendar_queue = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={
+                    "message": "Queue a Google calendar event for Hospital follow-up with Marcus on 2026-05-18 at 3pm for 1 hour location County Hospital with marcus@example.test.",
+                    "mode": "live",
+                },
+            )
+            unverified_queue_titles = {action.get("title") for action in unverified_calendar_queue.get("actions", [])}
+            assert_true(
+                unverified_calendar_queue["intent"] == "calendar_event_provider_not_ready",
+                "Complete calendar event prompts should not become generic missing-details prompts when the provider is unverified.",
+            )
+            assert_true(
+                "enough event details" in unverified_calendar_queue["reply"].lower(),
+                "Provider-not-ready calendar prompts should acknowledge the event details were understood.",
+            )
+            assert_true(
+                "Check Google Workspace credentials" in unverified_queue_titles,
+                "Provider-not-ready calendar prompts should attach a credential-check card.",
+            )
             unverified_sync = client.post(
                 "/assistant/integrations/google_workspace/sync?email_limit=5&calendar_days=14",
                 headers={"X-Marge-Account-Token": token},
@@ -529,6 +717,77 @@ def main() -> None:
             )
             assert_true(unverified_sync.status_code == 409, "Connected Google credentials should not sync before a credential check.")
             assert_true("check credentials" in unverified_sync.text.lower(), "Pre-verification sync rejection should tell the pastor to check credentials.")
+            assistant_router.requests.get = fake_google_get_failure
+            try:
+                failed_chat_sync = request_json(
+                    client,
+                    "POST",
+                    "/assistant/chat",
+                    token=token,
+                    json={"message": "Sync Google Workspace.", "mode": "live"},
+                )
+            finally:
+                assistant_router.requests.get = original_get
+            failed_chat_sync_titles = {action.get("title") for action in failed_chat_sync.get("actions", [])}
+            failed_chat_sync_prompts = failed_chat_sync.get("suggested_prompts") or []
+            assert_true(
+                failed_chat_sync["intent"] == "integration_verify_failed_before_sync",
+                "Chat-triggered sync should stop at failed no-sync verification before importing Google context.",
+            )
+            assert_true(
+                "No ministry data was imported and no actions were queued" in failed_chat_sync.get("reply", ""),
+                "Failed chat-triggered sync should make the no-side-effect boundary explicit.",
+            )
+            assert_true(
+                "Check Google Workspace credentials" in failed_chat_sync_titles,
+                "Failed chat-triggered sync should attach the Google credential-check card.",
+            )
+            assert_true(
+                "Check Google Workspace credentials." in failed_chat_sync_prompts,
+                "Failed chat-triggered sync should suggest the exact credential-check prompt.",
+            )
+            assert_true(
+                "Sync Google Workspace." not in failed_chat_sync_prompts,
+                "Failed chat-triggered sync should not suggest retrying sync before credentials pass.",
+            )
+            request_json(
+                client,
+                "PATCH",
+                "/assistant/policies/google_workspace",
+                token=token,
+                json={"write_enabled": True, "require_approval": True, "allowed_actions": ["email_draft"]},
+            )
+            unverified_write_action = request_json(
+                client,
+                "POST",
+                "/assistant/actions",
+                token=token,
+                json={
+                    "action_type": "email_draft",
+                    "title": "Unverified Google draft",
+                    "payload": {"email": {"to": "person@example.test", "subject": "Hello", "body": "Body"}},
+                    "external_provider": "google_workspace",
+                    "privacy_level": "pastoral",
+                },
+            )
+            request_json(client, "POST", f"/assistant/actions/{unverified_write_action['id']}/approve", token=token, json={})
+            unverified_write = client.post(
+                f"/assistant/actions/{unverified_write_action['id']}/execute",
+                headers={"X-Marge-Account-Token": token},
+                json={},
+            )
+            assert_true(unverified_write.status_code == 409, "External writeback should require checked credentials even after policy approval.")
+            assert_true(
+                "check credentials" in unverified_write.text.lower() and "before writing externally" in unverified_write.text.lower(),
+                "Unverified writeback rejection should name the credential-check boundary.",
+            )
+            request_json(
+                client,
+                "PATCH",
+                "/assistant/policies/google_workspace",
+                token=token,
+                json={"write_enabled": False, "require_approval": True, "allowed_actions": []},
+            )
 
             valid_encryption_key = os.environ["MARGE_ENCRYPTION_KEY"]
             os.environ["MARGE_ENCRYPTION_KEY"] = "not-a-fernet-key"
@@ -537,6 +796,15 @@ def main() -> None:
                 assert_true(
                     "MARGE_ENCRYPTION_KEY" in blocked_rock_setup.get("missing_config", []),
                     "Connector setup should treat an invalid encryption key as missing secure token storage.",
+                )
+                assert_true(
+                    "ROCK_API_KEY" in blocked_rock_setup.get("missing_config", [])
+                    and "ROCK_BASE_URL" in blocked_rock_setup.get("missing_config", []),
+                    "Rock connector setup should ask for generic Rock API key and base URL config.",
+                )
+                assert_true(
+                    "ROCK_HALLMARK_API_KEY" not in blocked_rock_setup.get("missing_config", []),
+                    "Rock connector setup should not expose the old Hallmark-specific env var name.",
                 )
                 blocked_rock_credentials = client.post(
                     "/assistant/integrations/rock/credentials",
@@ -553,8 +821,174 @@ def main() -> None:
                 )
             finally:
                 os.environ["MARGE_ENCRYPTION_KEY"] = valid_encryption_key
+            rock_setup = request_json(client, "POST", "/assistant/integrations/rock/start", token=token, json={})
+            assert_true(
+                "MARGE_ENCRYPTION_KEY" not in rock_setup.get("missing_config", []),
+                "Rock setup should accept workspace credentials when encrypted storage is configured.",
+            )
+            assert_true(
+                "ROCK_API_KEY" in rock_setup.get("missing_config", [])
+                and "ROCK_BASE_URL" in rock_setup.get("missing_config", []),
+                "Rock setup should still surface optional server-side API key/base URL names before workspace credentials are saved.",
+            )
+            rock_setup_chat = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "Connect Rock RMS.", "mode": "live"},
+            )
+            rock_setup_titles = {action.get("title") for action in rock_setup_chat.get("actions", [])}
+            rock_setup_actions = {action.get("action") for action in rock_setup_chat.get("actions", [])}
+            assert_true(
+                rock_setup_chat["intent"] == "integration_setup_started",
+                "Chat should start Rock setup when workspace credentials can be entered.",
+            )
+            assert_true(
+                "encrypted workspace credential setup" in rock_setup_chat["reply"].lower(),
+                "Rock setup chat should point admins to encrypted workspace credentials instead of server config only.",
+            )
+            assert_true("Connect Rock RMS" in rock_setup_titles, "Rock setup chat should attach the Rock setup card.")
+            assert_true(
+                "Add encrypted credentials" in rock_setup_actions,
+                "Rock setup card should be actionable when encrypted workspace credential storage is ready.",
+            )
+            missing_rock_base = client.post(
+                "/assistant/integrations/rock/credentials",
+                headers={"X-Marge-Account-Token": token},
+                json={"api_key": "rock-secret-smoke"},
+            )
+            assert_true(missing_rock_base.status_code == 422, "Rock workspace credentials should require the church's API base URL.")
+            assert_true("base url" in missing_rock_base.text.lower(), "Rock base URL validation should explain what is missing.")
+            insecure_rock_base = client.post(
+                "/assistant/integrations/rock/credentials",
+                headers={"X-Marge-Account-Token": token},
+                json={"api_key": "rock-secret-smoke", "base_url": "http://rock.example.test/api/v2"},
+            )
+            assert_true(insecure_rock_base.status_code == 422, "Rock workspace credentials should reject non-HTTPS API base URLs.")
+            assert_true("https" in insecure_rock_base.text.lower(), "Insecure Rock base URL validation should tell the operator to use HTTPS.")
+            private_rock_base = client.post(
+                "/assistant/integrations/rock/credentials",
+                headers={"X-Marge-Account-Token": token},
+                json={"api_key": "rock-secret-smoke", "base_url": "https://127.0.0.1/api/v2"},
+            )
+            assert_true(private_rock_base.status_code == 422, "Rock workspace credentials should reject localhost/private-network API base URLs.")
+            assert_true("public https" in private_rock_base.text.lower(), "Private Rock base URL validation should require a public HTTPS host.")
+            unsafe_rock_base = client.post(
+                "/assistant/integrations/rock/credentials",
+                headers={"X-Marge-Account-Token": token},
+                json={"api_key": "rock-secret-smoke", "base_url": "https://user:pass@rock.example.test/api/v2?api_key=leak"},
+            )
+            assert_true(unsafe_rock_base.status_code == 422, "Rock workspace credentials should reject base URLs that smuggle secrets or query strings.")
+            assert_true(
+                "without username, password, query, or fragment" in unsafe_rock_base.text.lower(),
+                "Unsafe Rock base URL validation should explain which URL parts are not allowed.",
+            )
+            configured_rock = request_json(
+                client,
+                "POST",
+                "/assistant/integrations/rock/credentials",
+                token=token,
+                json={"api_key": "rock-secret-smoke", "base_url": "https://rock.example.test/api/v2"},
+            )
+            assert_true(configured_rock["status"] == "configured", "Rock workspace credentials should save encrypted when key and base URL are present.")
+            legacy_rock_sync = client.post(
+                "/members/sync/rock",
+                headers={"X-Marge-Account-Token": token},
+                json={},
+            )
+            assert_true(
+                legacy_rock_sync.status_code == 409,
+                "Legacy member Rock sync should not bypass credential verification.",
+            )
+            assert_true(
+                "check credentials" in legacy_rock_sync.text.lower(),
+                "Legacy member Rock sync should route through the verify-before-sync boundary.",
+            )
+
+            db = SessionLocal()
+            try:
+                pre_chat_verify_action_count = (
+                    db.query(AssistantAction).filter(AssistantAction.account_id == signup["account_id"]).count()
+                )
+                pre_chat_verify_context_count = (
+                    db.query(ConnectedContextItem).filter(ConnectedContextItem.account_id == signup["account_id"]).count()
+                )
+            finally:
+                db.close()
 
             assistant_router.requests.get = fake_google_get
+            chat_verification = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "Check Google Workspace credentials.", "mode": "live"},
+            )
+            assert_true(
+                chat_verification["intent"] == "integration_verified",
+                "Following Marge's Check credentials prompt should run verification through chat.",
+            )
+            assert_true(
+                "verified without syncing people, email, calendar, or attendance data" in chat_verification["reply"],
+                "Chat credential checks should say they verified without syncing ministry data.",
+            )
+            assert_true(
+                "did not queue any actions" in chat_verification["reply"].lower(),
+                "Chat credential checks should not queue pastor actions.",
+            )
+            assert_true(
+                chat_verification.get("actions") == [],
+                "Chat credential checks should return no action cards after successful verification.",
+            )
+            assert_true(
+                "Sync Google Workspace." in (chat_verification.get("suggested_prompts") or []),
+                "Chat credential checks may suggest sync only after credentials are verified.",
+            )
+            short_chat_verification = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "Check Google Workspace.", "mode": "live"},
+            )
+            assert_true(
+                short_chat_verification["intent"] == "integration_verified",
+                "Short Check provider prompts should also run no-sync credential verification through chat.",
+            )
+            assert_true(
+                "verified without syncing people, email, calendar, or attendance data" in short_chat_verification["reply"],
+                "Short Check provider prompts should still preserve the no-sync boundary.",
+            )
+            assert_true(
+                short_chat_verification.get("actions") == [],
+                "Short Check provider prompts should not queue pastor actions.",
+            )
+            db = SessionLocal()
+            try:
+                post_chat_verify_action_count = (
+                    db.query(AssistantAction).filter(AssistantAction.account_id == signup["account_id"]).count()
+                )
+                post_chat_verify_context_count = (
+                    db.query(ConnectedContextItem).filter(ConnectedContextItem.account_id == signup["account_id"]).count()
+                )
+                credential = (
+                    db.query(IntegrationCredential)
+                    .filter(IntegrationCredential.account_id == signup["account_id"], IntegrationCredential.provider == "google_workspace")
+                    .one()
+                )
+                assert_true(credential.verified_at is not None, "Chat credential check should persist the verification timestamp.")
+                assert_true(
+                    post_chat_verify_action_count == pre_chat_verify_action_count,
+                    "Chat credential checks should not create review actions.",
+                )
+                assert_true(
+                    post_chat_verify_context_count == pre_chat_verify_context_count,
+                    "Chat credential checks should not import connected context rows.",
+                )
+            finally:
+                db.close()
+
             verification = request_json(client, "POST", "/assistant/integrations/google_workspace/verify", token=token, json={})
             assert_true(verification["status"] == "verified", "Google verification should complete without syncing ministry data.")
             assert_true(verification["credential_scope"] == "user", "Google verification should use the current user's OAuth credential.")
@@ -577,6 +1011,28 @@ def main() -> None:
             assert_true(
                 "ready now: google workspace" in verified_status_chat["reply"].lower(),
                 "Connector status chat should name verified external providers as ready.",
+            )
+            verified_calendar_help = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "What calendar details do you need?", "mode": "live"},
+            )
+            assert_true(
+                "connected Google Workspace calendar can stage" in verified_calendar_help["reply"],
+                "Credential-checked Google calendar should be described as ready to stage review items.",
+            )
+            assert_true(
+                not verified_calendar_help.get("actions"),
+                "Credential-checked calendar help should not attach setup cards.",
+            )
+            request_json(
+                client,
+                "PATCH",
+                "/assistant/profile",
+                token=token,
+                json={"tools_in_use": "Google Workspace"},
             )
 
             db = SessionLocal()
@@ -608,6 +1064,12 @@ def main() -> None:
             pastor_google = next(item for item in pastor_integrations if item["provider"] == "google_workspace")
             assert_true(pastor_google["status"] == "needs_authorization", "Another pastor user should not inherit the owner's Google OAuth credential.")
             assert_true(pastor_google["credential_scope"] is None, "Unconnected pastor user should not see a credential scope.")
+            pastor_prepared = request_json(client, "POST", "/assistant/actions/prepare?mode=live", token=pastor_token, json={})
+            pastor_prepared_titles = {action["title"] for action in pastor_prepared}
+            assert_true(
+                "Connect Google Workspace" in pastor_prepared_titles,
+                "Preparing actions for another pastor should use that pastor's OAuth readiness, not the owner's verified credential.",
+            )
             pastor_sync = client.post(
                 "/assistant/integrations/google_workspace/sync?email_limit=5&calendar_days=14",
                 headers={"X-Marge-Account-Token": pastor_token},
@@ -643,6 +1105,7 @@ def main() -> None:
                 token=token,
                 json={
                     "church_context": "Visitor follow-up matters because many new families are arriving tired.",
+                    "support_preferences": "Nudge me gently and surface follow-up loops I am likely to miss.",
                     "communication_style": "warm and brief",
                     "guardrails": "Do not send emails or write to external systems without my approval.",
                 },
@@ -687,7 +1150,7 @@ def main() -> None:
                 client,
                 "POST",
                 "/assistant/signup",
-                json={"pastor_name": "Pastor Other Smoke", "church_name": "OAuth Other Smoke Church"},
+                json={"pastor_name": "Pastor Other Smoke", "church_name": "OAuth Other Smoke Church", "email": "oauth-other-smoke@example.test"},
             )
             account_ids.append(second["account_id"])
             second_integrations = request_json(client, "GET", "/assistant/integrations", token=second["token"])
@@ -757,6 +1220,106 @@ def main() -> None:
                 json={},
             )
             assert_true(sync_after_disconnect.status_code == 409, "Disconnected Google credentials should not sync.")
+            cached_google_context_after_disconnect = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "Show Google Workspace context.", "mode": "live"},
+            )
+            cached_google_prompts = cached_google_context_after_disconnect.get("suggested_prompts") or []
+            assert_true(
+                cached_google_context_after_disconnect["intent"] == "connected_context_lookup",
+                "Cached Google context should remain visible after disconnect.",
+            )
+            assert_true(
+                "Visitor coffee with Jordan" in cached_google_context_after_disconnect.get("reply", "")
+                or "Follow-up after Sunday" in cached_google_context_after_disconnect.get("reply", ""),
+                "Cached Google context after disconnect should still show prior synced review context.",
+            )
+            assert_true(
+                "secure setup" in cached_google_context_after_disconnect.get("reply", "").lower()
+                and "no-sync credential check" in cached_google_context_after_disconnect.get("reply", "").lower(),
+                "Cached Google context after disconnect should require setup/check before refresh.",
+            )
+            assert_true(
+                "Sync Google Workspace again." not in cached_google_prompts,
+                "Disconnected cached context should not suggest syncing Google again.",
+            )
+            assert_true(
+                any(action.get("provider") == "google_workspace" for action in cached_google_context_after_disconnect.get("actions", [])),
+                "Disconnected cached context should attach the Google reconnect/check card.",
+            )
+            cached_inbox_after_disconnect = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "What is in my inbox?", "mode": "live"},
+            )
+            cached_inbox_prompts = cached_inbox_after_disconnect.get("suggested_prompts") or []
+            assert_true(
+                cached_inbox_after_disconnect["intent"] == "synced_inbox",
+                "Cached synced inbox should remain visible after disconnect.",
+            )
+            assert_true(
+                "secure setup" in cached_inbox_after_disconnect.get("reply", "").lower()
+                and "no-sync credential check" in cached_inbox_after_disconnect.get("reply", "").lower(),
+                "Cached synced inbox after disconnect should require setup/check before refresh.",
+            )
+            assert_true(
+                "Sync the mailbox again." not in cached_inbox_prompts,
+                "Disconnected cached inbox should not suggest syncing the mailbox again.",
+            )
+            assert_true(
+                any(action.get("provider") == "google_workspace" for action in cached_inbox_after_disconnect.get("actions", [])),
+                "Disconnected cached inbox should attach the Google reconnect/check card.",
+            )
+            queued_replies_after_disconnect = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "Queue replies for these.", "mode": "live"},
+            )
+            queued_reply_prompts = queued_replies_after_disconnect.get("suggested_prompts") or []
+            assert_true(
+                queued_replies_after_disconnect["intent"] == "draft_synced_email_replies_queued",
+                "Cached synced inbox replies may still be drafted locally after disconnect.",
+            )
+            assert_true(
+                "Sync the mailbox again." not in queued_reply_prompts,
+                "Disconnected cached inbox reply drafts should not suggest mailbox sync.",
+            )
+            assert_true(
+                any(action.get("provider") == "google_workspace" for action in queued_replies_after_disconnect.get("actions", [])),
+                "Disconnected cached inbox reply drafts should keep the Google reconnect/check card visible.",
+            )
+            cached_meetings_after_disconnect = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "What meetings need prep?", "mode": "live"},
+            )
+            cached_meeting_prompts = cached_meetings_after_disconnect.get("suggested_prompts") or []
+            assert_true(
+                cached_meetings_after_disconnect["intent"] == "meeting_prep_lookup",
+                "Cached synced meetings should remain visible after disconnect.",
+            )
+            assert_true(
+                "secure setup" in cached_meetings_after_disconnect.get("reply", "").lower()
+                and "no-sync credential check" in cached_meetings_after_disconnect.get("reply", "").lower(),
+                "Cached synced meetings after disconnect should require setup/check before refresh.",
+            )
+            assert_true(
+                "Sync the calendar again." not in cached_meeting_prompts,
+                "Disconnected cached meetings should not suggest calendar sync.",
+            )
+            assert_true(
+                any(action.get("provider") == "google_workspace" for action in cached_meetings_after_disconnect.get("actions", [])),
+                "Disconnected cached meetings should attach the Google reconnect/check card.",
+            )
 
             db = SessionLocal()
             try:

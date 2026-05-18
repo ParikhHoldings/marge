@@ -96,6 +96,7 @@ def _draft_context_from_profile(profile: Optional[AccountPastorProfile]) -> dict
     context = {
         "drafting_voice": _clean(profile.communication_style),
         "faith_tradition": _clean(profile.faith_tradition),
+        "support_preferences": _clean(profile.support_preferences),
         "guardrail": _clean(profile.guardrails),
     }
     return {key: value for key, value in context.items() if value}

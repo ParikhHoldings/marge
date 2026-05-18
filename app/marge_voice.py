@@ -12,12 +12,11 @@ a busy day, ship it.
 
 # ── Morning greeting ──────────────────────────────────────────────────────────
 
-PASTOR_GREETING = "Good morning, Pastor {pastor_name}. Here are your people for today."
+PASTOR_GREETING = "Good morning, {pastor_name}. Here is the ministry context I can see today."
 
 BRIEFING_EMPTY_STATE = (
-    "It looks like your flock is well-tended today. "
-    "One suggestion: when's the last time you had coffee with an elder just to connect? "
-    "No agenda. Just care."
+    "I do not see a real care, visitor, absence, birthday, anniversary, or prayer item needing follow-up in the current workspace yet. "
+    "Add or sync ministry context when you are ready, and I will keep the next person from slipping."
 )
 
 # ── Visitor follow-up templates ───────────────────────────────────────────────

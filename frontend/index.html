@@ -810,6 +810,15 @@
       color: #214533;
     }
 
+    .bubble.has-actions {
+      width: min(100%, 660px);
+      max-width: 100%;
+    }
+
+    .bubble.has-actions .message-action-card {
+      background: rgba(255,253,248,.86);
+    }
+
     .detail {
       position: sticky;
       top: 0;
@@ -1559,7 +1568,7 @@
           type: "care",
           id: c.id,
           member_id: c.member_id,
-          name: c.member_name || "Unknown",
+          name: c.member_name || "Name not linked",
           priority: !c.last_contact || stale > 10 ? "high" : "medium",
           reason: `${label(c.category)} care${c.description ? ` - ${c.description}` : ""}`,
           next: c.last_contact ? `Last contact ${formatDate(c.last_contact)}` : "No contact logged",
@@ -1583,7 +1592,7 @@
           type: "prayer",
           id: p.id,
           member_id: p.member_id,
-          name: p.submitted_by || "Anonymous",
+          name: p.submitted_by || "Name withheld",
           priority: p.is_private ? "high" : "medium",
           reason: p.request_text,
           next: "Check in on this prayer request",
@@ -1660,6 +1669,18 @@
       return isConnectedForSync(item) && !item.verified_at;
     }
 
+    function integrationStatusLabel(item) {
+      if (canSyncIntegration(item)) return "Verified";
+      if (connectorNeedsVerification(item)) return "Needs check";
+      return label(item?.status);
+    }
+
+    function integrationStatusClass(item) {
+      if (canSyncIntegration(item)) return "";
+      if (connectorNeedsVerification(item)) return "medium";
+      return ["connected", "configured", "available"].includes(item?.status) ? "" : "medium";
+    }
+
     function connectorActionButton(item, options = {}) {
       const style = options.primary ? "primary" : "secondary";
       if (canSyncIntegration(item)) {
@@ -1733,7 +1754,7 @@
         setSidebarRows([
           ["Email", `${emailDrafts} draft${emailDrafts === 1 ? "" : "s"}`],
           ["Calendar", `${calendarBlocks} block${calendarBlocks === 1 ? "" : "s"}`],
-          ["Care", attention ? `${attention} to review` : (approvals ? `${approvals} approval${approvals === 1 ? "" : "s"}` : "Clear")],
+          ["Care", attention ? `${attention} to review` : (approvals ? `${approvals} approval${approvals === 1 ? "" : "s"}` : "None visible")],
         ]);
       }
       els.sideAvatar.textContent = initials(pastor);
@@ -1802,7 +1823,7 @@
           email: ["Email", "Create a workspace first.", "Marge can draft and triage after she has a private workspace and secure connector setup."],
           calendar: ["Calendar", "Create a workspace first.", "Marge can suggest protected time after she learns your rhythm inside a private workspace."],
           integrations: ["Integrations", "Create a workspace first.", "Secure connector setup starts after Marge has a private church workspace for credentials and synced context."],
-          agents: ["Agent Tools", "Create a workspace first.", "MCP-capable assistants should act through a scoped Marge workspace, not shared preview data."],
+          agents: ["Agent Tools", "Create a workspace first.", "External AI assistants should act through a scoped Marge workspace, not shared preview data."],
           plan: ["Plan", "Create a workspace first.", "Approvals belong inside a private workspace before Marge prepares drafts, setup steps, or writeback actions."]
         };
       }
@@ -1815,8 +1836,8 @@
         prayer: ["Prayer", "Requests that need care.", "Keep public and private prayer needs visible until someone checks back in."],
         email: ["Email", "Marge's draft desk.", "Triage ministry email, prepare replies, and keep pastoral follow-up tied to people."],
         calendar: ["Calendar", "Time for ministry.", "Protect sermon work, prepare meetings, and let Marge propose visit blocks before anything is booked."],
-        integrations: ["Integrations", "Use the tools churches already trust.", "Rock RMS, Planning Center, Breeze, Google, and Outlook can feed Marge without making Marge the ChMS. MCP stays under Agent Tools."],
-        agents: ["Agent Tools", "AI clients can help too.", "Connect Marge to MCP-capable assistants without giving up pastoral safety."],
+        integrations: ["Integrations", "Use the tools churches already trust.", "Rock RMS, Planning Center, Breeze, Google Workspace, and Microsoft 365 can feed Marge without making Marge the ChMS. Agent access stays separate."],
+        agents: ["Agent Tools", "AI clients can help too.", "Connect Marge to approved AI assistants without giving up pastoral safety."],
         plan: ["Plan", "Approval queue.", "Prepared work Marge will not send or write until the pastor approves it."]
       };
     }
@@ -1877,7 +1898,11 @@
       if (state.mode !== "demo" && needsFirstRealContext) {
         return ["Good morning.", "Add the first real ministry context.", "Marge will not call the desk clear until she has at least one real person, visitor, care case, or prayer request to watch."];
       }
-      return ["Good morning.", state.briefing?.greeting?.replace(/^Good morning,?\s*/i, "") || "Here are your people for today.", "Start here. Marge has sorted the people who should not slip through the cracks."];
+      return [
+        "Good morning.",
+        state.briefing?.greeting?.replace(/^Good morning,?\s*/i, "") || "Marge is reading this workspace.",
+        "Start here. Marge will surface real people, care, visitor, prayer, and approval work from this church workspace."
+      ];
     }
 
     function renderMain() {
@@ -1983,7 +2008,7 @@
               </div>
               <div class="record-card">
                 <h3>Not a new ChMS</h3>
-                <p class="meta-text">Rock RMS, Planning Center, Breeze, Google, and Outlook remain the systems of record. Marge is the assistant layer.</p>
+                <p class="meta-text">Rock RMS, Planning Center, Breeze, Google Workspace, and Microsoft 365 remain the systems of record. Marge is the assistant layer.</p>
               </div>
             </div>
           </section>
@@ -2004,7 +2029,7 @@
               ${calendarBlocks.length && !needsFirstRealContext ? workRow(calendarBlocks[0]?.title || "Protect a ministry block", calendarBlocks[0]?.detail || calendarBlocks[0]?.subtitle || "Marge will propose care and prep blocks from your profile and current priorities.", "Calendar", "calendar") : ""}
               ${needsWorkspace ? `<div class="work-row"><div><strong>Create a church workspace</strong><div class="meta-text">Marge needs a private workspace before she learns ministry context, recommends connectors, or queues follow-up work.</div></div><button class="btn secondary" data-action="open-form" data-form="account">Create</button></div>` : ""}
               ${!needsWorkspace && needsContext && !firstSetupStep && !calendarBlocks.length ? workRow("Keep teaching Marge", interviewQuestion?.question || "Answer the next ministry-context question so Marge can prioritize without guessing.", "Teach Marge", "assistant") : ""}
-              ${items.length ? items.map(item => workRow(`${item.title}: ${item.action || item.subtitle || "Review"}`, item.detail || item.subtitle || "", label(item.type), "today")).join("") : (needsContext || needsFirstRealContext) ? "" : workRow("No urgent care gaps", "The current briefing does not show overdue care, visitor, or prayer follow-up.", "Today", "today")}
+              ${items.length ? items.map(item => workRow(`${item.title}: ${item.action || item.subtitle || "Review"}`, item.detail || item.subtitle || "", label(item.type), "today")).join("") : (needsContext || needsFirstRealContext) ? "" : workRow("No current follow-up items visible", "Marge has not found overdue care, visitor, prayer, or approval work in this workspace yet. Add or sync real context when you are ready.", "Today", "today")}
             </div>
           </section>
 
@@ -2024,7 +2049,7 @@
       if (!messages.length && needsWorkspace) {
         messages = [
           { who: "marge", text: "Good morning. Create a workspace first, then I can learn your ministry context and keep this church's care private." },
-          { who: "marge", text: "After that I will ask about your church, church voice, follow-up burden, first priority, tools, voice, rhythm, and guardrails before recommending what to connect or queue." }
+          { who: "marge", text: "After that I will ask about your church, church voice, follow-up burden, first priority, how you want support, tools, voice, rhythm, and guardrails before recommending what to connect or queue." }
         ];
       } else if (!messages.length && interview) {
         messages = [
@@ -2088,6 +2113,7 @@
       if (actionId) return `<button class="btn secondary" data-action="action-open" data-action-id="${escapeHtml(actionId)}">Open</button>`;
       const target = chatActionView(item);
       if (target) return `<button class="btn secondary" data-view="${target.view}">${escapeHtml(target.label)}</button>`;
+      if (item.form === "account") return `<button class="btn primary" data-action="open-form" data-form="account">${escapeHtml(item.action || "Create workspace")}</button>`;
       if (item.form) return `<button class="btn secondary" data-action="open-form" data-form="${escapeHtml(seedForm(item))}">${escapeHtml(item.action || "Open")}</button>`;
       return `<button class="btn secondary" data-view="plan">Review</button>`;
     }
@@ -2150,8 +2176,9 @@
           { label: "After signup", prompt: "What happens after I create a workspace?" }
         );
       } else if (interviewQuestion) {
-        const answer = onboardingAnswerExample(interviewQuestion);
+        const answer = onboardingAnswerExample(interviewQuestion, currentProfile());
         if (answer) prompts.push({ label: `Answer ${interviewQuestion.label.toLowerCase()}`, prompt: answer });
+        prompts.push({ label: "What to include", prompt: `What should I include for ${interviewQuestion.label.toLowerCase()}?` });
         prompts.push({ label: "Why this?", prompt: "What do you still need to learn about my ministry?" });
       } else if (setupSteps[0]) {
         prompts.push({ label: shortPrompt(setupPrompt(setupSteps[0])), prompt: setupPrompt(setupSteps[0]) });
@@ -2165,7 +2192,7 @@
         return ["What will you learn about my ministry?", "How do secure connections work?", "What happens after I create a workspace?"];
       }
       if (!profile.onboarding_complete) {
-        return ["What do you still need to learn about my ministry?", "How will you use this context?", "How do secure connections work?"];
+        return ["What do you still need to learn about my ministry?", "How will you support me?", "How do secure connections work?"];
       }
       if (setupSteps[0]) {
         return [setupPrompt(setupSteps[0]), "Why is this the next step?", "Explain the approval rules."];
@@ -2183,20 +2210,23 @@
       return text.length > 72 ? `${text.slice(0, 69)}...` : text;
     }
 
-    function onboardingAnswerExample(question) {
+    function onboardingAnswerExample(question, profile = currentProfile()) {
+      const pastorName = String(profile?.pastor_name || state.desk?.pastor_name || "").trim();
+      const churchName = String(profile?.church_name || state.desk?.church_name || "").trim();
       const examples = {
-        pastor_name: "Call me Pastor Nathan.",
-        church_name: "I serve at Grace Community Church.",
-        role_title: "I am a solo pastor and we average about 85 people each week.",
-        congregation_size: "We average about 85 people each week.",
-        church_context: "We are a small neighborhood church with a lot of new families and tired volunteers.",
-        faith_tradition: "Our church tradition is non-denominational with Baptist roots; avoid insider language with guests.",
-        followup_pain: "Visitor follow-up after Sunday is where things slip through the cracks.",
-        ministry_priorities: "My first priority this month is closing loops with first-time guests and private prayer needs.",
-        tools_in_use: "We use Planning Center and Gmail.",
-        communication_style: "Please write in a warm and brief voice.",
-        weekly_rhythm: "Protect sermon prep on Thursday mornings and hospital visits on Tuesday afternoons.",
-        guardrails: "Do not send emails or write to external systems without my approval."
+        pastor_name: pastorName ? `Call me ${pastorName}.` : "",
+        church_name: churchName ? `I serve at ${churchName}.` : "",
+        role_title: "",
+        congregation_size: "",
+        church_context: "",
+        faith_tradition: "",
+        followup_pain: "",
+        ministry_priorities: "",
+        support_preferences: "",
+        tools_in_use: "",
+        communication_style: "",
+        weekly_rhythm: "",
+        guardrails: ""
       };
       return examples[question.field] || "";
     }
@@ -2249,7 +2279,7 @@
       const signInLink = needsWorkspace ? `
           <div style="padding:0 18px 18px">
             <form class="form-grid" data-submit="login-link">
-              <label>Email<input name="email" type="email" required placeholder="pastor@example.com" /></label>
+              <label>Email<input name="email" type="email" required placeholder="you@yourchurch.org" /></label>
               <label>Church slug<input name="church_slug" placeholder="optional" /></label>
               <div class="modal-actions form-full"><button class="btn secondary">Send sign-in link</button></div>
             </form>
@@ -2267,7 +2297,7 @@
             </div>
           </div>
           <div style="padding:18px" class="mini-grid">
-            <div class="record-card"><h3>${needsWorkspace ? "Private workspace" : `${profile.completion_percent || 0}% profile`}</h3><p class="meta-text">Marge gets more useful as she learns your church, church voice, first priority, tools, weekly rhythm, and guardrails.</p></div>
+            <div class="record-card"><h3>${needsWorkspace ? "Private workspace" : `${profile.completion_percent || 0}% profile`}</h3><p class="meta-text">Marge gets more useful as she learns your church, church voice, first priority, support style, tools, weekly rhythm, and guardrails.</p></div>
             <div class="record-card"><h3>Secure tools next</h3><p class="meta-text">Marge will connect through OAuth, encrypted API-key setup, or server-side secrets. She should never ask you to paste passwords into chat.</p></div>
           </div>
           ${signInLink}
@@ -2289,6 +2319,7 @@
             <div class="record-card"><h3>${escapeHtml(profile.church_name || "Your church")}</h3><p class="meta-text">${escapeHtml(profile.church_context || "No church context saved yet.")}</p></div>
             <div class="record-card"><h3>Church voice</h3><p class="meta-text">${escapeHtml(profile.faith_tradition || "Tell Marge the tradition and language boundaries to respect.")}</p></div>
             <div class="record-card"><h3>First priority</h3><p class="meta-text">${escapeHtml(profile.ministry_priorities || "Tell Marge what should get better first.")}</p></div>
+            <div class="record-card"><h3>Support style</h3><p class="meta-text">${escapeHtml(profile.support_preferences || "Tell Marge how to nudge, protect, and support you personally.")}</p></div>
             <div class="record-card"><h3>Follow-up burden</h3><p class="meta-text">${escapeHtml(profile.followup_pain || "Tell Marge where follow-up breaks down.")}</p></div>
           </div>
         </section>
@@ -2403,7 +2434,7 @@
           ? workRow("Teach Marge first", state.desk?.interview_question?.question || "Answer the next ministry-context question so Marge can prioritize without guessing.", "Answer", "assistant")
           : needsFirstRealContext
             ? setupWorkRow(dataSeedStep)
-            : `<div class="empty">No urgent care gaps are visible in the current live data.</div>`;
+            : `<div class="empty">No current follow-up items are visible in this workspace yet. Add or sync real ministry context when you are ready.</div>`;
       const todayPromptList = needsWorkspace
         ? assistantPromptOptions([], null, [], true)
         : needsContext
@@ -2448,7 +2479,7 @@
       if (needsWorkspace) {
         return [
           stat("Private workspace", "Start", "Create the workspace before Marge saves pastoral context."),
-          stat("Ministry questions", "Next", "Marge will ask about role, church voice, burden, tools, rhythm, and guardrails."),
+          stat("Ministry questions", "Next", "Marge will ask about role, church voice, burden, support style, tools, rhythm, and guardrails."),
           stat("Secure tools", "After", "Connect church systems without pasting passwords into chat."),
           stat("Approval posture", "Review", "Drafts and writeback stay queued for pastor approval."),
         ].join("");
@@ -2529,7 +2560,7 @@
         <section class="tell-panel">
           <h2>${escapeHtml(title)}</h2>
           <div class="chat-history" id="chatHistory">
-            ${state.chat.slice(-4).map(m => `<div class="bubble ${m.who}">${escapeHtml(m.text)}</div>`).join("")}
+            ${state.chat.slice(-4).map(tellChatBubbleHtml).join("")}
           </div>
           <div class="tell-row">
             <input id="tellInput" placeholder="${escapeHtml(placeholder)}" />
@@ -2540,6 +2571,12 @@
           </div>
         </section>
       `;
+    }
+
+    function tellChatBubbleHtml(message) {
+      const who = message.who === "user" ? "user" : "marge";
+      const hasActions = (message.actions || []).length || (message.prompts || []).length;
+      return `<div class="bubble ${who}${hasActions ? " has-actions" : ""}">${chatMessageBodyHtml(message)}</div>`;
     }
 
     function renderPeople() {
@@ -2636,11 +2673,11 @@
     }
 
     function careCaseRow(c) {
-      const item = { type: "care", id: c.id, member_id: c.member_id, name: c.member_name || "Unknown", draftKind: "care", situation: c.category };
+      const item = { type: "care", id: c.id, member_id: c.member_id, name: c.member_name || "Name not linked", draftKind: "care", situation: c.category };
       return `
         <div class="care-row" data-select='${escapeHtml(JSON.stringify({ type: "member", id: c.member_id, fallbackName: c.member_name }))}'>
           <div class="priority-bar priority-${c.status === "active" ? "high" : "low"}"></div>
-          <div class="row-cell"><div class="avatar small">${escapeHtml(initials(c.member_name))}</div><div><div class="name">${escapeHtml(c.member_name || "Unknown")}</div><div class="meta-text">${escapeHtml(label(c.category))}</div></div></div>
+          <div class="row-cell"><div class="avatar small">${escapeHtml(initials(c.member_name))}</div><div><div class="name">${escapeHtml(c.member_name || "Name not linked")}</div><div class="meta-text">${escapeHtml(label(c.category))}</div></div></div>
           <div class="row-cell stack"><div class="tiny">Description</div><div class="meta-text">${escapeHtml(c.description || "No description")}</div></div>
           <div class="row-cell stack"><div class="tiny">Status</div><div class="meta-text">${escapeHtml(label(c.status))} - last contact ${formatDate(c.last_contact)}</div></div>
           <div class="row-actions">
@@ -2713,7 +2750,7 @@
     }
 
     function prayerCard(p) {
-      const who = p.member_name || p.submitted_by || "Anonymous";
+      const who = p.member_name || p.submitted_by || "Name withheld";
       const item = { type: "prayer", id: p.id, member_id: p.member_id, name: who, draftKind: "prayer" };
       return `
         <article class="record-card" data-select='${escapeHtml(JSON.stringify({ type: p.member_id ? "member" : "prayer", id: p.member_id || p.id, fallbackName: who, item }))}'>
@@ -2762,7 +2799,7 @@
         <section class="mini-grid">
           <div class="record-card">
             <h3>Inbox triage</h3>
-            <p class="meta-text">Connected Gmail and Outlook items become pastor-review actions before any reply is drafted.</p>
+            <p class="meta-text">Connected Gmail/Google Workspace and Outlook/Microsoft 365 items become pastor-review actions before any reply is drafted.</p>
           </div>
           <div class="record-card">
             <h3>Memory link</h3>
@@ -2782,6 +2819,7 @@
 
     function emailContextRow(item) {
       const action = connectedEmailAction(item);
+      const draftPrompt = `Draft reply to synced email: ${item.title}`;
       return `
         <div class="work-row">
           <div>
@@ -2790,7 +2828,7 @@
             <div class="meta-text">${escapeHtml(item.snippet || item.subtitle || "Review synced inbox context.")}</div>
           </div>
           <div class="row-actions" style="padding:0">
-            ${action ? `<button class="btn primary" data-action="action-open" data-action-id="${action.id}">${action.action_type === "email_draft" ? "Open draft" : "Review"}</button>` : `<button class="btn secondary" data-view="plan">Approval queue</button>`}
+            ${action ? `<button class="btn primary" data-action="action-open" data-action-id="${action.id}">${action.action_type === "email_draft" ? "Open draft" : "Review"}</button>` : `<button class="btn secondary" data-prompt="${escapeHtml(draftPrompt)}">Draft reply</button>`}
           </div>
         </div>
       `;
@@ -2980,6 +3018,7 @@
 
     function calendarContextRow(item) {
       const action = connectedCalendarAction(item);
+      const prepPrompt = `Prepare meeting brief for ${item.title}`;
       return `
         <div class="work-row">
           <div>
@@ -2988,7 +3027,7 @@
             <div class="meta-text">${escapeHtml(item.subtitle || item.snippet || "Review synced calendar context.")}</div>
           </div>
           <div class="row-actions" style="padding:0">
-            ${action ? `<button class="btn primary" data-action="action-open" data-action-id="${action.id}">${action.action_type === "meeting_prep" ? "Open prep" : "Review"}</button>` : `<button class="btn secondary" data-view="plan">Approval queue</button>`}
+            ${action ? `<button class="btn primary" data-action="action-open" data-action-id="${action.id}">${action.action_type === "meeting_prep" ? "Open prep" : "Review"}</button>` : `<button class="btn secondary" data-prompt="${escapeHtml(prepPrompt)}">Prepare brief</button>`}
           </div>
         </div>
       `;
@@ -3145,11 +3184,11 @@
                 const policy = policyByProvider[item.provider] || {};
                 const canSync = canSyncIntegration(item);
                 const needsVerification = connectorNeedsVerification(item);
-                const canToggleWriteback = writebackAllowedActions(item.provider).length > 0 && item.status === "connected";
+                const canToggleWriteback = writebackAllowedActions(item.provider).length > 0 && canSync;
                 const canDisconnect = item.auth_type === "oauth" && item.status === "connected";
                 return `
               <div class="integration-card">
-                <div class="tag ${["connected", "configured", "available"].includes(item.status) ? "" : "medium"}">${escapeHtml(label(item.status))}</div>
+                <div class="tag ${integrationStatusClass(item)}">${escapeHtml(integrationStatusLabel(item))}</div>
                 <h3>${escapeHtml(item.display_name)}</h3>
                 <p class="meta-text">${escapeHtml((item.scopes || []).join(", "))}</p>
                 <p class="meta-text">${escapeHtml(item.config_hint || item.secure_note)}</p>
@@ -3179,7 +3218,7 @@
           <div style="padding:18px" class="work-list">
             ${connectedItems.length ? connectedItems.slice(0, 8).map(connectedContextRow).join("") : `
               <div class="work-row">
-                <div><strong>No external context synced yet</strong><div class="meta-text">Connect Google Workspace, Planning Center, or Rock RMS, then sync to let Marge watch ministry inbox, calendar, people, and attendance context.</div></div>
+                <div><strong>No external context synced yet</strong><div class="meta-text">Connect Google Workspace, Microsoft 365, Planning Center, Breeze, or Rock RMS, check credentials, then sync to let Marge watch ministry inbox, calendar, people, and attendance context.</div></div>
                 ${firstSyncTarget ? connectorActionButton(firstSyncTarget, { short: true }) : firstVerifyTarget ? connectorActionButton(firstVerifyTarget, { short: true }) : `<button class="btn secondary" data-action="integration-start" data-provider="google_workspace">Start secure setup</button>`}
               </div>
             `}
@@ -3265,7 +3304,7 @@
     }
 
     function deskDraftText(item) {
-      const name = item.subtitle || "friend";
+      const name = item.subtitle || "there";
       const first = name.split(" ")[0];
       const pastor = currentPastorName();
       const church = currentChurchName();
@@ -3323,9 +3362,9 @@
         `;
       }
       const provider = setup.provider || "";
-      const baseRequired = provider === "breeze";
-      const baseLabel = provider === "breeze" ? "Breeze base URL" : "Base URL";
-      const basePlaceholder = provider === "breeze" ? "https://yourchurch.breezechms.com" : "https://rock.yourchurch.org/api/v2";
+      const baseRequired = ["breeze", "rock"].includes(provider);
+      const baseLabel = provider === "breeze" ? "Breeze base URL" : provider === "rock" ? "Rock base URL" : "Base URL";
+      const basePlaceholder = provider === "breeze" ? "https://yourchurch.breezechms.com" : provider === "rock" ? "https://rock.yourchurch.org/api/v2" : "https://provider.yourchurch.org";
       return `
         <form class="form-grid" data-submit="integration-credential" style="margin-top:16px">
           <input type="hidden" name="provider" value="${escapeHtml(provider)}" />
@@ -3356,7 +3395,7 @@
         const displayName = providerDisplayName(provider);
         els.modalContent.innerHTML = `
           <h2 id="modalTitle">${escapeHtml(displayName)} Verified</h2>
-          <p class="muted">${escapeHtml(result.message || "Credentials verified without syncing ministry data.")}</p>
+          <p class="muted">${escapeHtml(redactSecretText(result.message || "Credentials verified without syncing ministry data."))}</p>
           <div class="detail-list" style="margin-top:14px">
             <div class="detail-item"><div class="tiny">Status</div>${escapeHtml(label(result.status || "verified"))}</div>
             <div class="detail-item"><div class="tiny">Verified</div>${escapeHtml(formatDate(result.verified_at))}</div>
@@ -3382,7 +3421,7 @@
       if (!ok) return;
       try {
         const result = await api(`/assistant/integrations/${provider}`, { method: "DELETE" });
-        toast(result.message || `${displayName} disconnected.`);
+        toast(redactSecretText(result.message || `${displayName} disconnected.`));
         await loadData();
       } catch (error) {
         console.error(error);
@@ -3391,23 +3430,52 @@
     }
 
     function verificationIdentityHtml(identity) {
-      const entries = Object.entries(identity || {}).filter(([, value]) => value !== null && value !== undefined && value !== "");
+      const rawEntries = Object.entries(identity || {}).filter(([, value]) => value !== null && value !== undefined && value !== "");
+      const entries = rawEntries.filter(([key, value]) => !unsafeIdentityKey(key) && !unsafeIdentityValue(value));
       if (!entries.length) return "";
-      return entries.slice(0, 8).map(([key, value]) => `
+      const hidden = rawEntries.length - entries.length;
+      return `
+        ${entries.slice(0, 8).map(([key, value]) => `
         <div class="detail-item"><div class="tiny">${escapeHtml(label(key))}</div>${escapeHtml(String(value))}</div>
-      `).join("");
+        `).join("")}
+        ${hidden ? `<div class="detail-item"><div class="tiny">Provider metadata</div>Some verification metadata was hidden because it looked like a secret.</div>` : ""}
+      `;
+    }
+
+    function unsafeIdentityKey(key) {
+      return /(^|[_\-.])(access[_\-.]?token|refresh[_\-.]?token|id[_\-.]?token|api[_\-.]?key|client[_\-.]?secret|token[_\-.]?ciphertext|authorization|bearer|cookie|password|secret|token)([_\-.]|$)/i.test(String(key || ""));
+    }
+
+    function unsafeIdentityValue(value) {
+      const text = typeof value === "string" ? value : JSON.stringify(value || "");
+      return /\b(access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|client[_-]?secret|token[_-]?ciphertext)\s*[:=]\s*\S+/i.test(text)
+        || /\bauthorization\s*[:=]\s*bearer\s+\S+/i.test(text)
+        || /\bbearer\s+[A-Za-z0-9._~+/\-]{16,}/i.test(text)
+        || /\bmarge_sess_[A-Za-z0-9._~+\-/=]{8,}/.test(text)
+        || /\bya29\.[A-Za-z0-9._~+\-/=]{8,}/.test(text)
+        || /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{8,}/.test(text);
+    }
+
+    function redactSecretText(value) {
+      return String(value || "")
+        .replace(/\b(access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|client[_-]?secret|token[_-]?ciphertext)\s*[:=]\s*[^\s,;]+/gi, "$1=<redacted>")
+        .replace(/\b(authorization\s*[:=]\s*bearer\s+)[^\s,;]+/gi, "$1<redacted>")
+        .replace(/\b(bearer\s+)[A-Za-z0-9._~+/\-]{16,}/gi, "$1<redacted>")
+        .replace(/\bmarge_sess_[A-Za-z0-9._~+\-/=]{8,}/g, "<redacted-marge-session>")
+        .replace(/\bya29\.[A-Za-z0-9._~+\-/=]{8,}/g, "<redacted-google-token>")
+        .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{8,}/g, "<redacted-jwt>");
     }
 
     function errorMessage(error, fallback) {
       const raw = String(error?.body || error?.message || "");
       try {
         const parsed = JSON.parse(raw);
-        if (typeof parsed.detail === "string") return parsed.detail;
+        if (typeof parsed.detail === "string") return redactSecretText(parsed.detail);
         if (Array.isArray(parsed.detail)) {
           const messages = parsed.detail
             .map(item => item?.msg || item?.message || "")
             .filter(Boolean);
-          if (messages.length) return messages.slice(0, 2).join(" ");
+          if (messages.length) return redactSecretText(messages.slice(0, 2).join(" "));
         }
       } catch {}
       return fallback;
@@ -3436,6 +3504,7 @@
     function writebackSummary(item, policy) {
       const allowed = writebackAllowedActions(item.provider);
       if (!allowed.length) return "Writeback: not supported for this connector";
+      if (!canSyncIntegration(item)) return "Writeback: locked until credentials pass Check credentials.";
       const policyActions = Array.isArray(policy.allowed_actions) && policy.allowed_actions.length ? policy.allowed_actions : allowed;
       const scopeText = policyActions.map(writebackActionLabel).join(", ");
       return `Writeback: ${policy.write_enabled ? "enabled after approval" : "off by church policy"} for ${scopeText}`;
@@ -3517,7 +3586,7 @@
         els.content.innerHTML = `
           <section class="panel">
             <div class="panel-head">
-              <div><h2>Teach Marge Before Approvals</h2><p>Approvals should be based on your ministry context, church voice, tools, rhythm, and guardrails.</p></div>
+              <div><h2>Teach Marge Before Approvals</h2><p>Approvals should be based on your ministry context, church voice, support style, tools, rhythm, and guardrails.</p></div>
               <button class="btn secondary" data-view="assistant">Answer context</button>
             </div>
             <div style="padding:18px" class="work-list">
@@ -3590,6 +3659,9 @@
 
     function actionPrimaryButton(action, setupCta) {
       const buttonClass = `btn ${setupCta ? "secondary" : "primary"}`;
+      if (action.action_type === "pastoral_reminder" && action.status === "pending") {
+        return `<button class="${buttonClass}" data-action="action-complete" data-action-id="${action.id}">Mark done</button>`;
+      }
       if (action.status === "approved") {
         return `<button class="${buttonClass}" data-action="action-execute" data-action-id="${action.id}">${escapeHtml(actionExecuteLabel(action))}</button>`;
       }
@@ -3608,6 +3680,7 @@
       if (action.action_type === "person_review") return "Add to Marge";
       if (action.action_type === "integration_setup") return "Mark setup done";
       if (action.action_type === "calendar_block") return "Mark reviewed";
+      if (action.action_type === "pastoral_reminder") return "Mark done";
       return "Done";
     }
 
@@ -3635,6 +3708,9 @@
       }
       if (action.action_type === "calendar_block") {
         return "This keeps pastor approval attached to the protected ministry block. Marge will not write to an external calendar until a connected calendar action and policy allow it.";
+      }
+      if (action.action_type === "pastoral_reminder") {
+        return "This is local Marge memory only. Marking it done will not send, sync, or write to an external system.";
       }
       return "Marge will not send or write externally until this item is approved.";
     }
@@ -3709,6 +3785,7 @@
       const actions = activeActions();
       const approvals = actions.length ? actions : (desk.approvals || []);
       const integrations = desk.integrations || [];
+      const detailIntegrations = integrations.filter(item => item.provider !== "mcp");
       els.detail.innerHTML = `
         <div class="detail-card">
           <div class="detail-top">
@@ -3725,17 +3802,17 @@
 
         <div class="desk-section">
           <h3>Email drafts <span class="desk-count">${emailDrafts.length}</span></h3>
-          ${emailDrafts.length ? emailDrafts.slice(0, 4).map(item => `<div class="desk-row"><span>${escapeHtml(item.title)}${item.subtitle ? ` - ${escapeHtml(item.subtitle)}` : ""}</span><strong>${escapeHtml(item.action || "Review")}</strong></div>`).join("") : `<div class="desk-row"><span>No drafts queued from current data</span><strong>Clear</strong></div>`}
+          ${emailDrafts.length ? emailDrafts.slice(0, 4).map(item => `<div class="desk-row"><span>${escapeHtml(item.title)}${item.subtitle ? ` - ${escapeHtml(item.subtitle)}` : ""}</span><strong>${escapeHtml(item.action || "Review")}</strong></div>`).join("") : `<div class="desk-row"><span>No drafts queued from current workspace context</span><strong>None queued</strong></div>`}
         </div>
 
         <div class="desk-section">
           <h3>Calendar <span class="desk-count">${calendarBlocks.length}</span></h3>
-          ${calendarBlocks.length ? calendarBlocks.slice(0, 3).map(item => `<div class="desk-row"><span>${escapeHtml(item.title)}</span><strong>${escapeHtml(item.action || "Propose")}</strong></div>`).join("") : `<div class="desk-row"><span>No calendar blocks suggested</span><strong>Clear</strong></div>`}
+          ${calendarBlocks.length ? calendarBlocks.slice(0, 3).map(item => `<div class="desk-row"><span>${escapeHtml(item.title)}</span><strong>${escapeHtml(item.action || "Propose")}</strong></div>`).join("") : `<div class="desk-row"><span>No calendar blocks suggested from current workspace context</span><strong>None suggested</strong></div>`}
         </div>
 
         <div class="desk-section">
           <h3>Follow-ups <span class="desk-count">${followups.length}</span></h3>
-          ${followups.length ? followups.slice(0, 4).map(item => `<div class="desk-row"><span>${escapeHtml(item.title)} - ${escapeHtml(item.action || item.subtitle || "Review")}</span><strong>${escapeHtml(label(item.priority))}</strong></div>`).join("") : `<div class="desk-row"><span>No urgent follow-up gaps</span><strong>Clear</strong></div>`}
+          ${followups.length ? followups.slice(0, 4).map(item => `<div class="desk-row"><span>${escapeHtml(item.title)} - ${escapeHtml(item.action || item.subtitle || "Review")}</span><strong>${escapeHtml(label(item.priority))}</strong></div>`).join("") : `<div class="desk-row"><span>No current follow-up items visible</span><strong>None visible</strong></div>`}
         </div>
 
         <div class="desk-section">
@@ -3745,7 +3822,7 @@
 
         <div class="desk-section">
           <h3>Integrations</h3>
-          ${integrations.slice(0, 4).map(item => `<div class="desk-row"><span><span class="status-dot ${["connected", "configured", "available"].includes(item.status) ? "" : "warn"}"></span>${escapeHtml(item.display_name)}</span><strong>${escapeHtml(label(item.status))}</strong></div>`).join("")}
+          ${detailIntegrations.length ? detailIntegrations.slice(0, 4).map(item => `<div class="desk-row"><span><span class="status-dot ${integrationStatusClass(item) ? "warn" : ""}"></span>${escapeHtml(item.display_name)}</span><strong>${escapeHtml(integrationStatusLabel(item))}</strong></div>`).join("") : `<div class="desk-row"><span>No church tools connected yet</span><strong>Setup</strong></div>`}
         </div>
       `;
     }
@@ -3767,10 +3844,12 @@
       }
       const member = state.mode === "live" ? state.selectedDetail : state.members.find(m => m.id === selected.id);
       const fallback = selected.item || {};
-      const name = member?.full_name || selected.fallbackName || fallback.name || "Selected person";
+      const name = member?.full_name || selected.fallbackName || fallback.name || "Selected record";
       const care = member?.care_cases || state.care.filter(c => c.member_id === selected.id);
       const prayers = member?.prayer_requests || state.prayers.filter(p => p.member_id === selected.id);
       const notes = member?.notes || [];
+      const preferenceNotes = notes.filter(n => n.context_tag === "preference");
+      const otherNotes = notes.filter(n => n.context_tag !== "preference");
       const detailDraftItem = fallback.type ? fallback : {
         type: "general",
         member_id: selected.type === "member" ? selected.id : null,
@@ -3812,7 +3891,7 @@
 
         <div class="detail-card">
           <h3>Current Situation</h3>
-          <p class="meta-text">${escapeHtml(fallback.reason || care[0]?.description || "No urgent situation logged.")}</p>
+          <p class="meta-text">${escapeHtml(fallback.reason || care[0]?.description || "No current situation is attached to this record yet.")}</p>
           <div class="chips">
             <button class="btn secondary" data-action="draft" data-item='${escapeHtml(JSON.stringify(detailDraftItem))}'>Draft message</button>
             ${selected.type === "member" ? `<button class="btn secondary" data-action="open-form" data-form="note" data-member="${selected.id}">Add note</button>` : ""}
@@ -3820,9 +3899,16 @@
         </div>
 
         <div class="detail-card">
-          <h3>Notes</h3>
+          <h3>Preferences To Respect</h3>
           <div class="detail-list">
-            ${notes.length ? notes.slice(0, 5).map(n => `<div class="detail-item"><div class="tiny">${formatDate(n.created_at)}${n.context_tag ? ` - ${escapeHtml(label(n.context_tag))}` : ""}</div>${escapeHtml(n.note_text)}</div>`).join("") : `<div class="detail-item">No notes yet.</div>`}
+            ${preferenceNotes.length ? preferenceNotes.slice(0, 3).map(n => `<div class="detail-item"><div class="tiny">${formatDate(n.created_at)} - preference</div>${escapeHtml(n.note_text)}</div>`).join("") : `<div class="detail-item">No preferences saved yet.</div>`}
+          </div>
+        </div>
+
+        <div class="detail-card">
+          <h3>Recent Notes</h3>
+          <div class="detail-list">
+            ${otherNotes.length ? otherNotes.slice(0, 5).map(n => `<div class="detail-item"><div class="tiny">${formatDate(n.created_at)}${n.context_tag ? ` - ${escapeHtml(label(n.context_tag))}` : ""}</div>${escapeHtml(n.note_text)}</div>`).join("") : `<div class="detail-item">No recent notes yet.</div>`}
           </div>
         </div>
 
@@ -3843,7 +3929,7 @@
     }
 
     function localDraft(item) {
-      const first = (item.name || "friend").split(" ")[0];
+      const first = (item.name || "there").split(" ")[0];
       const pastor = currentPastorName();
       const church = currentChurchName();
       if (item.type === "birthday") return `Hey ${first}, happy birthday. I am grateful for you and hope today is full of good things.\n\n- ${pastor}`;
@@ -3933,8 +4019,8 @@
         <h2 id="modalTitle">Create Church Workspace</h2>
         <p class="muted">${escapeHtml(contextNote || "Start the private workspace with the basics. Marge will ask the ministry-context questions next, one at a time.")}</p>
         <form class="form-grid" data-submit="account">
-          <label>Your name<input name="pastor_name" placeholder="Pastor name" /></label>
-          <label>Email<input name="email" type="email" placeholder="pastor@example.com" /></label>
+          <label>Your name<input name="pastor_name" required placeholder="Pastor name" /></label>
+          <label>Email<input name="email" type="email" required placeholder="you@yourchurch.org" /></label>
           <label class="form-full">Church<input name="church_name" required placeholder="Church name" /></label>
           <div class="modal-actions form-full"><button type="button" class="btn secondary" data-action="close-modal">Cancel</button><button class="btn primary">Create Workspace</button></div>
         </form>
@@ -3956,7 +4042,8 @@
           <label class="form-full">Church voice<textarea name="faith_tradition" placeholder="What tradition, denomination, or ministry language should Marge respect?">${field("faith_tradition")}</textarea></label>
           <label class="form-full">First ministry priority<textarea name="ministry_priorities" placeholder="What would make Marge genuinely helpful in the first month?">${field("ministry_priorities")}</textarea></label>
           <label class="form-full">Where follow-up breaks down<textarea name="followup_pain" placeholder="Visitors, hospital follow-up, prayer requests, absent members...">${field("followup_pain")}</textarea></label>
-          <label class="form-full">Tools in use<textarea name="tools_in_use" placeholder="Planning Center, Rock RMS, Gmail, Outlook, Breeze...">${field("tools_in_use")}</textarea></label>
+          <label class="form-full">How to support you<textarea name="support_preferences" placeholder="Nudge me gently, protect my rest, surface what I am likely to miss...">${field("support_preferences")}</textarea></label>
+          <label class="form-full">Tools in use<textarea name="tools_in_use" placeholder="Planning Center, Gmail/Google Workspace, Outlook/Microsoft 365, Rock RMS, Breeze...">${field("tools_in_use")}</textarea></label>
           <label class="form-full">Drafting voice<textarea name="communication_style" placeholder="Warm and brief, more formal, conversational...">${field("communication_style")}</textarea></label>
           <label class="form-full">Weekly rhythm<textarea name="weekly_rhythm" placeholder="Sermon prep Thursdays, hospital visits Tuesdays...">${field("weekly_rhythm")}</textarea></label>
           <label class="form-full">Guardrails<textarea name="guardrails" placeholder="Never send messages or write to external systems without approval.">${field("guardrails")}</textarea></label>
@@ -4229,6 +4316,20 @@
       }
     }
 
+    async function completeAssistantAction(actionId) {
+      try {
+        await api(`/assistant/actions/${actionId}/approve`, { method: "POST", body: "{}" });
+        const result = await api(`/assistant/actions/${actionId}/execute`, { method: "POST", body: "{}" });
+        toast(actionUpdateMessage(result, "execute"));
+        await loadData();
+        if (els.modal.classList.contains("open")) await openAssistantAction(actionId);
+        return result;
+      } catch (error) {
+        console.error(error);
+        toast("Marge could not mark that reminder done.");
+      }
+    }
+
     function actionUpdateMessage(action, verb) {
       if (verb === "approve") return "Approved. Marge will still wait before any external write.";
       if (verb === "skip") return "Skipped.";
@@ -4240,6 +4341,7 @@
       if (execution.kind === "email_reply_drafted") return "Reply draft prepared for review.";
       if (execution.kind === "local_member_upsert") return `${execution.created ? "Created" : "Updated"} local Marge person memory.`;
       if (action?.action_type === "calendar_block") return "Calendar block marked reviewed.";
+      if (action?.action_type === "pastoral_reminder") return "Reminder marked done.";
       return "Marked done.";
     }
 
@@ -4264,18 +4366,29 @@
       const execution = action.payload?.execution;
       const person = action.payload?.person;
       const plan = action.payload?.plan || [];
+      const draftContext = action.payload?.draft_context || action.payload?.review_context || {};
+      const memberPreferences = Array.isArray(draftContext.member_preferences) ? draftContext.member_preferences : [];
+      const memberPreferenceTexts = memberPreferences.map(preference => {
+        if (typeof preference === "string") return preference;
+        const text = preference?.text || "";
+        if (!text) return "";
+        return preference?.member_name && !draftContext.member_name ? `${preference.member_name}: ${text}` : text;
+      }).filter(Boolean);
+      const memberContext = Array.isArray(draftContext.member_context) ? draftContext.member_context : [];
       const setupCta = setupStepActionButton(setupStep);
       els.modalContent.innerHTML = `
         <h2 id="modalTitle">${escapeHtml(action.title)}</h2>
         <p class="muted">${escapeHtml(action.description || label(action.action_type))}</p>
         <div class="detail-list" style="margin-top:14px">
           <div class="detail-item"><div class="tiny">Status</div>${escapeHtml(label(action.status))}</div>
+          ${memberPreferenceTexts.length ? `<div class="detail-item"><div class="tiny">${escapeHtml(draftContext.member_name ? `Preferences to respect for ${draftContext.member_name}` : "Preferences to respect")}</div>${memberPreferenceTexts.map(text => `<div class="meta-text">${escapeHtml(text)}</div>`).join("")}</div>` : ""}
+          ${memberContext.length ? `<div class="detail-item"><div class="tiny">People context</div>${memberContext.map(item => `<div class="meta-text"><strong>${escapeHtml(item.member_name || "Name not linked")}</strong>${[...(item.active_care || []), ...(item.active_prayer || [])].map(text => ` - ${escapeHtml(text)}`).join("")}</div>`).join("")}</div>` : ""}
           ${email && isEmailDraft ? `<div class="detail-item"><div class="tiny">To</div>${escapeHtml(email.to || "Recipient needed")}</div><div class="detail-item"><div class="tiny">Subject</div>${escapeHtml(email.subject || "")}</div><div class="detail-item"><div class="tiny">Draft</div><pre class="suggested">${escapeHtml(email.body || "")}</pre></div>` : ""}
-          ${email && !isEmailDraft ? `<div class="detail-item"><div class="tiny">Synced email</div><strong>${escapeHtml(email.subject || action.title)}</strong><div class="meta-text">${escapeHtml(email.from || "Sender not listed")}</div><div class="meta-text">${escapeHtml(email.snippet || "No preview synced.")}</div></div>` : ""}
+          ${email && !isEmailDraft ? `<div class="detail-item"><div class="tiny">Synced email</div><strong>${escapeHtml(email.subject || action.title)}</strong><div class="meta-text">${escapeHtml(email.from || "Sender not available")}</div><div class="meta-text">${escapeHtml(email.snippet || "No preview was included by the provider.")}</div></div>` : ""}
           ${deskItem && !email && !brief && !calendarEvent ? `<div class="detail-item"><div class="tiny">Recommendation</div><strong>${escapeHtml(deskItem.title || action.title)}</strong><div class="meta-text">${escapeHtml(deskItem.detail || deskItem.subtitle || deskItem.action || action.description || "")}</div></div>` : ""}
           ${brief ? `<div class="detail-item"><div class="tiny">Meeting brief</div><pre class="suggested">${escapeHtml(brief)}</pre></div>` : ""}
           ${calendarEvent && !brief ? `<div class="detail-item"><div class="tiny">Calendar event</div>${escapeHtml(calendarEvent.summary || calendarEvent.subject || calendarEvent.name || calendarEvent.title || "Calendar event")}</div>` : ""}
-          ${person ? `<div class="detail-item"><div class="tiny">Synced person</div><strong>${escapeHtml(person.name || [person.first_name, person.last_name].filter(Boolean).join(" ") || "Person")}</strong><div class="meta-text">${escapeHtml([person.status || person.membership, person.email, person.phone].filter(Boolean).join(" - ") || "Review before adding to local memory.")}</div></div>` : ""}
+          ${person ? `<div class="detail-item"><div class="tiny">Synced person</div><strong>${escapeHtml(person.name || [person.first_name, person.last_name].filter(Boolean).join(" ") || "Name not linked")}</strong><div class="meta-text">${escapeHtml([person.status || person.membership, person.email, person.phone].filter(Boolean).join(" - ") || "Review before adding to local memory.")}</div></div>` : ""}
           ${setupStep ? `<div class="detail-item"><div class="tiny">Setup step</div><strong>${escapeHtml(setupStep.title || action.title)}</strong><div class="meta-text">${escapeHtml(setupStep.subtitle || setupStep.detail || "")}</div></div>` : ""}
           ${integrationSetup ? `<div class="detail-item"><div class="tiny">Connector</div><strong>${escapeHtml(integrationSetup.display_name || label(integrationSetup.provider || "integration"))}</strong><div class="meta-text">${escapeHtml(label(integrationSetup.status || "setup"))} - ${escapeHtml(label(integrationSetup.setup_type || "connector"))}</div></div>` : ""}
           ${integrationSetup?.missing_config?.length ? `<div class="detail-item"><div class="tiny">Server config needed</div>${integrationSetup.missing_config.map(escapeHtml).join(", ")}</div>` : ""}
@@ -4298,27 +4411,41 @@
     function executionSummaryHtml(execution) {
       if (!execution?.kind) return "";
       if (execution.kind === "local_member_upsert") {
-        return `<div class="detail-item"><div class="tiny">Execution</div>${escapeHtml(execution.created ? "Created local person" : "Updated local person")}: ${escapeHtml(execution.member_name || "Member")}</div>`;
+        return `<div class="detail-item"><div class="tiny">Execution</div>${escapeHtml(execution.created ? "Created local person" : "Updated local person")}: ${escapeHtml(execution.member_name || "Name not linked")}</div>`;
       }
       if (execution.kind === "email_reply_drafted") {
         return `<div class="detail-item"><div class="tiny">Execution</div>Prepared reply draft: ${escapeHtml(execution.draft_title || "Draft reply")}</div>`;
       }
       if (execution.kind === "gmail_draft") {
-        return `<div class="detail-item"><div class="tiny">Execution</div>Created Gmail draft${execution.provider_id ? `: ${escapeHtml(execution.provider_id)}` : ""}. It was not sent.</div>`;
+        return `<div class="detail-item"><div class="tiny">Execution</div>Created Gmail draft${execution.provider_id ? `: ${escapeHtml(redactSecretText(execution.provider_id))}` : ""}. It was not sent.</div>`;
       }
       if (execution.kind === "outlook_draft") {
-        const link = execution.web_link ? ` <a href="${escapeHtml(execution.web_link)}" target="_blank" rel="noreferrer">Open in Outlook</a>` : "";
-        return `<div class="detail-item"><div class="tiny">Execution</div>Created Outlook draft${execution.provider_id ? `: ${escapeHtml(execution.provider_id)}` : ""}. It was not sent.${link}</div>`;
+        const href = safeExternalHref(execution.web_link);
+        const link = href ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">Open in Outlook</a>` : "";
+        return `<div class="detail-item"><div class="tiny">Execution</div>Created Outlook draft${execution.provider_id ? `: ${escapeHtml(redactSecretText(execution.provider_id))}` : ""}. It was not sent.${link}</div>`;
       }
       if (execution.kind === "calendar_event") {
-        const link = execution.html_link ? ` <a href="${escapeHtml(execution.html_link)}" target="_blank" rel="noreferrer">Open event</a>` : "";
-        return `<div class="detail-item"><div class="tiny">Execution</div>Created Google Calendar event${execution.provider_id ? `: ${escapeHtml(execution.provider_id)}` : ""}.${link}</div>`;
+        const href = safeExternalHref(execution.html_link);
+        const link = href ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">Open event</a>` : "";
+        return `<div class="detail-item"><div class="tiny">Execution</div>Created Google Calendar event${execution.provider_id ? `: ${escapeHtml(redactSecretText(execution.provider_id))}` : ""}.${link}</div>`;
       }
       if (execution.kind === "outlook_calendar_event") {
-        const link = execution.web_link ? ` <a href="${escapeHtml(execution.web_link)}" target="_blank" rel="noreferrer">Open in Outlook</a>` : "";
-        return `<div class="detail-item"><div class="tiny">Execution</div>Created Outlook calendar event${execution.provider_id ? `: ${escapeHtml(execution.provider_id)}` : ""}.${link}</div>`;
+        const href = safeExternalHref(execution.web_link);
+        const link = href ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">Open in Outlook</a>` : "";
+        return `<div class="detail-item"><div class="tiny">Execution</div>Created Outlook calendar event${execution.provider_id ? `: ${escapeHtml(redactSecretText(execution.provider_id))}` : ""}.${link}</div>`;
       }
       return `<div class="detail-item"><div class="tiny">Execution</div>${escapeHtml(label(execution.kind))}</div>`;
+    }
+
+    function safeExternalHref(value) {
+      const href = String(value || "").trim();
+      if (!href || unsafeIdentityValue(href) || /[?&#](token|api[_-]?key|apikey|client[_-]?secret|access[_-]?token|refresh[_-]?token|id[_-]?token)=/i.test(href)) return "";
+      try {
+        const parsed = new URL(href);
+        return parsed.protocol === "https:" ? href : "";
+      } catch {
+        return "";
+      }
     }
 
     function setupStepActionButton(step) {
@@ -4332,7 +4459,17 @@
 
     function setupStepFromIntegrationSetup(setup) {
       if (!setup?.provider) return null;
-      const action = setup.authorization_url ? "Start secure setup" : (setup.missing_config?.length ? "Review server config" : "Open setup");
+      const missing = setup.missing_config || [];
+      const canAddWorkspaceApiKey = ["api_key", "env_api_key"].includes(setup.setup_type) && !missing.includes("MARGE_ENCRYPTION_KEY");
+      const action = setup.authorization_url
+        ? "Start secure setup"
+        : canAddWorkspaceApiKey
+          ? "Add encrypted credentials"
+          : missing.includes("MARGE_ENCRYPTION_KEY")
+            ? "Review encrypted storage"
+            : missing.length
+              ? "Review server config"
+              : "Open setup";
       return {
         type: "integration_setup",
         title: `Connect ${setup.display_name || label(setup.provider)}`,
@@ -4351,8 +4488,8 @@
       state.chat.push({ who: "user", text: message });
       input.value = "";
       renderMain();
-      if (state.view === "assistant" && needsWorkspaceForChat()) {
-        state.chat.push({ who: "marge", text: preWorkspaceReply(message) });
+      if (needsWorkspaceForChat()) {
+        state.chat.push(preWorkspaceChatMessage(message));
         renderMain();
         return;
       }
@@ -4386,14 +4523,19 @@
     function attachChatEnhancement(reply, enhancement) {
       const hasEnhancement = (enhancement.actions || []).length || (enhancement.prompts || []).length;
       if (!hasEnhancement) return;
+      const normalizedReply = normalizeChatText(reply);
       for (let index = state.chat.length - 1; index >= 0; index -= 1) {
         const message = state.chat[index];
-        if (message.who === "marge" && message.text === reply) {
+        if (message.who === "marge" && normalizeChatText(message.text) === normalizedReply) {
           state.chat[index] = { ...message, ...enhancement };
           return;
         }
       }
       state.chat.push({ who: "marge", text: reply, ...enhancement });
+    }
+
+    function normalizeChatText(value) {
+      return String(value || "").replace(/\s+/g, " ").trim();
     }
 
     async function clearChatHistory() {
@@ -4406,7 +4548,7 @@
       try {
         const result = await api("/assistant/chat/history", { method: "DELETE" });
         state.chat = [];
-        toast(result.message || "Assistant chat history cleared.");
+        toast(redactSecretText(result.message || "Assistant chat history cleared."));
         await loadData();
       } catch (error) {
         console.error(error);
@@ -4415,7 +4557,46 @@
     }
 
     function needsWorkspaceForChat() {
-      return !hasWorkspaceContext();
+      return state.mode !== "demo" && !hasWorkspaceContext();
+    }
+
+    function preWorkspaceChatMessage(message) {
+      return {
+        who: "marge",
+        text: preWorkspaceReply(message),
+        actions: [preWorkspaceActionCard()],
+        prompts: preWorkspacePrompts(message)
+      };
+    }
+
+    function preWorkspaceActionCard() {
+      return {
+        type: "workspace_setup",
+        title: "Create a church workspace",
+        subtitle: "Keep ministry context, credentials, chat history, and approvals scoped to your church.",
+        action: "Create workspace",
+        form: "account",
+        source: "workspace"
+      };
+    }
+
+    function preWorkspacePrompts(message) {
+      const lower = message.toLowerCase();
+      const prompts = [
+        "What will you learn about my ministry?",
+        "How do secure connections work?",
+        "What happens after I create a workspace?"
+      ];
+      if (lower.includes("secure") || lower.includes("connection") || lower.includes("connect")) {
+        return [prompts[0], prompts[2]];
+      }
+      if (lower.includes("after") || lower.includes("signup") || lower.includes("workspace")) {
+        return [prompts[0], prompts[1]];
+      }
+      if (lower.includes("learn") || lower.includes("ministry") || lower.includes("context")) {
+        return [prompts[1], prompts[2]];
+      }
+      return prompts;
     }
 
     function preWorkspaceReply(message) {
@@ -4474,6 +4655,7 @@
       if (action === "action-open") await openAssistantAction(actionEl.dataset.actionId);
       if (action === "action-approve") await updateAssistantAction(actionEl.dataset.actionId, "approve");
       if (action === "action-execute") await updateAssistantAction(actionEl.dataset.actionId, "execute");
+      if (action === "action-complete") await completeAssistantAction(actionEl.dataset.actionId);
       if (action === "action-skip") await updateAssistantAction(actionEl.dataset.actionId, "skip");
       if (action === "done") markDone(JSON.parse(actionEl.dataset.item));
       if (action === "resolve-care") {

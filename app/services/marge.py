@@ -91,7 +91,7 @@ def generate_morning_briefing(db: Session, pastor_name: str, church_name: str, a
     week_end = today + timedelta(days=BIRTHDAY_LOOKAHEAD_DAYS)
 
     return {
-        "greeting": voice.PASTOR_GREETING.format(pastor_name=pastor_name),
+        "greeting": voice.PASTOR_GREETING.format(pastor_name=pastor_display_name(pastor_name)),
         "pastor_name": pastor_name,
         "church_name": church_name,
         "generated_at": datetime.utcnow().isoformat(),
@@ -132,7 +132,7 @@ def generate_ai_briefing(briefing_data: dict, pastor_name: str, church_name: str
     if care:
         lines = []
         for c in care:
-            member_name = c.member.full_name if c.member else "Unknown"
+            member_name = c.member.full_name if c.member else "Name not linked"
             last = f"last contact {(date.today() - c.last_contact).days} days ago" if c.last_contact else "no contact logged"
             category = c.category.value if hasattr(c.category, "value") else c.category
             details = c.description[:120] if c.description else "no details"
@@ -151,7 +151,7 @@ def generate_ai_briefing(briefing_data: dict, pastor_name: str, church_name: str
     if prayers:
         sections.append(
             "Prayer requests needing follow-up:\n" + "\n".join(
-                f"- {(p.member.full_name if p.member else (p.submitted_by or 'Anonymous'))}: \"{p.request_text[:90]}\""
+                f"- {(p.member.full_name if p.member else (p.submitted_by or 'Name withheld'))}: \"{p.request_text[:90]}\""
                 for p in prayers
             )
         )
@@ -160,7 +160,14 @@ def generate_ai_briefing(briefing_data: dict, pastor_name: str, church_name: str
     if nudges:
         sections.append("Relational nudges:\n" + "\n".join(f"- {n}" for n in nudges))
 
-    context = "\n\n".join(sections) if sections else "No urgent pastoral needs flagged today."
+    if sections:
+        context = "\n\n".join(sections)
+    else:
+        context = (
+            "The current workspace does not yet have real birthdays, anniversaries, visitors needing follow-up, "
+            "active care cases, absent members, prayer requests needing follow-up, or relational nudges. "
+            "That means Marge needs the pastor to add or sync real ministry context; it does not mean the church has no pastoral needs."
+        )
 
     prompt = f"""You are Marge, the AI church secretary for {pastor_name} at {church_name}.
 
@@ -174,6 +181,8 @@ Rules:
 - Prioritize by pastoral urgency
 - Keep it concise enough to read on a phone
 - End with 2-3 very specific suggested next moves for today
+- If no real records are present, say that honestly and ask for the first real visitor, care, prayer, member, or synced tool context; do not imply the flock has been fully checked or all needs are handled
+- Never invent people, names, needs, or a clear-desk conclusion
 - Plain natural prose, not bullets
 - Never say 'based on the data' or sound like a dashboard
 """
@@ -278,7 +287,7 @@ def draft_visitor_followup(
 ) -> str:
     pastor_name = pastor_display_name(pastor_name)
     if not ai_provider_name():
-        first_name = visitor.first_name or "friend"
+        first_name = visitor.first_name or "there"
         visitor_note = _visitor_note_sentence(visitor.notes)
         style = (communication_style or "").lower()
         if day == 1:
@@ -347,7 +356,7 @@ def draft_care_message(
 ) -> str:
     pastor_name = pastor_display_name(pastor_name)
     if not ai_provider_name():
-        first_name = member.first_name or "friend"
+        first_name = member.first_name or "there"
         situation_lower = situation.lower()
         situation_sentence = _care_situation_sentence(situation)
         style = (communication_style or "").lower()
@@ -502,11 +511,11 @@ def render_briefing_text(briefing: dict) -> str:
         lines.append("🏥 ACTIVE CARE CASES")
         for c in care_cases:
             if hasattr(c, "member"):
-                member_name = c.member.full_name if c.member else "Unknown"
+                member_name = c.member.full_name if c.member else "Name not linked"
                 category = c.category.value if hasattr(c.category, "value") else c.category
                 last_contact = c.last_contact
             else:
-                member_name = c.get("member_name") or "Unknown"
+                member_name = c.get("member_name") or "Name not linked"
                 category = c.get("category")
                 last_contact = c.get("last_contact")
             last = f"Last contact: {last_contact}" if last_contact else "No contact logged"
@@ -528,11 +537,11 @@ def render_briefing_text(briefing: dict) -> str:
         lines.append("🙏 PRAYER REQUESTS NEEDING FOLLOW-UP")
         for p in prayers:
             if hasattr(p, "member"):
-                name = p.member.full_name if p.member else (p.submitted_by or "Anonymous")
+                name = p.member.full_name if p.member else (p.submitted_by or "Name withheld")
                 created_at = p.created_at
                 request_text = p.request_text
             else:
-                name = p.get("submitted_by") or "Anonymous"
+                name = p.get("submitted_by") or "Name withheld"
                 created_at = p.get("created_at")
                 request_text = p.get("request_text", "")
             days_ago = (datetime.utcnow() - created_at).days if isinstance(created_at, datetime) else "?"

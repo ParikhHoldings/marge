@@ -3,14 +3,16 @@ Rock RMS integration layer for Marge.
 
 Syncs people and attendance records from a Rock RMS instance into
 Marge's local database. The app functions fully standalone — if
-ROCK_HALLMARK_API_KEY is not set, sync methods return empty lists
-and log a warning rather than crashing.
+ROCK_API_KEY and ROCK_BASE_URL are not set, sync methods return empty lists
+and log a warning rather than crashing. ROCK_HALLMARK_API_KEY is still read as
+a legacy fallback for old local environments, but new deployments should use
+ROCK_API_KEY.
 
 Rock RMS API v2 reference:
-  https://rock.hbcfw.org/api/v2/docs/index
+  https://community.rockrms.com/developer
 
 Auth: Authorization-Token header (per-church API key)
-Base: https://rock.hbcfw.org/api/v2   (overridable via ROCK_BASE_URL env var)
+Base: Set ROCK_BASE_URL to the church's Rock API v2 base URL.
 """
 
 import os
@@ -27,7 +29,9 @@ logger = logging.getLogger(__name__)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-ROCK_DEFAULT_BASE = "https://rock.hbcfw.org/api/v2"
+ROCK_API_KEY_ENV = "ROCK_API_KEY"
+ROCK_LEGACY_API_KEY_ENV = "ROCK_HALLMARK_API_KEY"
+ROCK_BASE_URL_ENV = "ROCK_BASE_URL"
 
 # Reasonable timeouts for API calls
 REQUEST_TIMEOUT = int(os.getenv("ROCK_REQUEST_TIMEOUT", "15"))
@@ -39,11 +43,11 @@ ROCK_ACTIVE_RECORD_STATUS_ID = 3  # "Active" in Rock
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _rock_api_key(api_key: Optional[str] = None) -> str:
-    return api_key or os.getenv("ROCK_HALLMARK_API_KEY", "")
+    return api_key or os.getenv(ROCK_API_KEY_ENV, "") or os.getenv(ROCK_LEGACY_API_KEY_ENV, "")
 
 
 def _rock_base_url(base_url: Optional[str] = None) -> str:
-    return (base_url or os.getenv("ROCK_BASE_URL") or ROCK_DEFAULT_BASE).rstrip("/")
+    return (base_url or os.getenv(ROCK_BASE_URL_ENV) or "").rstrip("/")
 
 
 def _headers(api_key: Optional[str] = None) -> Dict[str, str]:
@@ -55,12 +59,18 @@ def _headers(api_key: Optional[str] = None) -> Dict[str, str]:
     }
 
 
-def _is_configured(api_key: Optional[str] = None) -> bool:
+def _is_configured(api_key: Optional[str] = None, base_url: Optional[str] = None) -> bool:
     """Return True if Rock API key is available."""
+    missing = []
     if not _rock_api_key(api_key):
+        missing.append(ROCK_API_KEY_ENV)
+    if not _rock_base_url(base_url):
+        missing.append(ROCK_BASE_URL_ENV)
+    if missing:
         logger.warning(
-            "ROCK_HALLMARK_API_KEY is not set — Rock RMS sync is disabled. "
-            "Marge will operate in standalone mode."
+            "Rock RMS sync is disabled because %s is not set. "
+            "Marge will operate in standalone mode.",
+            ", ".join(missing),
         )
         return False
     return True
@@ -78,7 +88,7 @@ def _get(
     Returns None on any error (including missing API key) so callers
     can gracefully fall back to an empty result.
     """
-    if not _is_configured(api_key):
+    if not _is_configured(api_key, base_url):
         return None
 
     rock_base = _rock_base_url(base_url)
@@ -225,13 +235,18 @@ def sync_members_from_rock(
             stats["skipped"] += 1
             continue
         seen_rock_ids.add(rock_id)
+        first_name = (person.get("FirstName") or "").strip()
+        last_name = (person.get("LastName") or "").strip()
+        if not first_name and not last_name:
+            stats["skipped"] += 1
+            continue
 
         existing = db.query(Member).filter(Member.rock_id == rock_id, Member.account_id == account_id).first()
 
         if existing:
             # Update fields that may have changed in Rock
-            existing.first_name = person.get("FirstName", existing.first_name)
-            existing.last_name = person.get("LastName", existing.last_name)
+            existing.first_name = first_name or existing.first_name
+            existing.last_name = last_name or existing.last_name
             existing.email = person.get("Email") or existing.email
             existing.phone = _parse_rock_phone(person) or existing.phone
             existing.birthday = _parse_rock_birthday(person) or existing.birthday
@@ -241,8 +256,8 @@ def sync_members_from_rock(
             member = Member(
                 account_id=account_id,
                 rock_id=rock_id,
-                first_name=person.get("FirstName", "Unknown"),
-                last_name=person.get("LastName", ""),
+                first_name=first_name,
+                last_name=last_name,
                 email=person.get("Email"),
                 phone=_parse_rock_phone(person),
                 birthday=_parse_rock_birthday(person),
@@ -334,10 +349,10 @@ def run_full_sync(
     Returns:
         Combined stats dict.
     """
-    if not _is_configured(api_key):
+    if not _is_configured(api_key, base_url):
         return {
             "rock_sync_enabled": False,
-            "message": "ROCK_HALLMARK_API_KEY not set — running in standalone mode.",
+            "message": "ROCK_API_KEY and ROCK_BASE_URL are not configured; running in standalone mode.",
         }
 
     member_stats = sync_members_from_rock(db, account_id=account_id, api_key=api_key, base_url=base_url)

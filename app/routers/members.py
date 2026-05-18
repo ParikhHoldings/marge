@@ -29,12 +29,11 @@ from app.services.accounts import (
     account_access_from_token,
     account_id,
     require_role,
+    require_workspace,
     scoped_query,
 )
 from app.services.marge import draft_care_message
 from app.services.setup_actions import retire_data_seed_actions
-from app.integrations import rock as rock_sync
-
 router = APIRouter(prefix="/members", tags=["members"])
 
 
@@ -131,6 +130,13 @@ class SyncResponse(BaseModel):
     message: Optional[str] = None
     members: Optional[dict] = None
     attendance: Optional[dict] = None
+    provider: Optional[str] = None
+    status: Optional[str] = None
+    synced_at: Optional[datetime] = None
+    items_seen: Optional[int] = None
+    items_created: Optional[int] = None
+    items_updated: Optional[int] = None
+    actions_prepared: Optional[int] = None
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -353,15 +359,35 @@ def sync_from_rock(
     db: Session = Depends(get_db),
 ):
     """
-    Trigger a full Rock RMS sync: pull active people and recent attendance.
+    Legacy compatibility route for Rock RMS sync.
 
-    Safe to call even without Rock credentials — returns a clear message
-    if the API key is not configured.
+    Delegates to the assistant connector path so Rock uses encrypted workspace
+    credentials, safe credential verification, connected-context summaries, and
+    reviewable follow-up actions.
     """
     access = account_access_from_token(db, x_marge_account_token)
     require_role(access, PASTORAL_ROLES, "sync Rock RMS")
-    result = rock_sync.run_full_sync(db, account_id=account_id(access.account))
-    return result
+    require_workspace(access, "sync Rock RMS")
+    from app.routers.assistant import _sync_rock_rms
+
+    result = _sync_rock_rms(db, account=access.account)
+    return SyncResponse(
+        rock_sync_enabled=result.status == "synced",
+        message=result.message,
+        provider=result.provider,
+        status=result.status,
+        synced_at=result.synced_at,
+        items_seen=result.items_seen,
+        items_created=result.items_created,
+        items_updated=result.items_updated,
+        actions_prepared=result.actions_prepared,
+        members={
+            "items_seen": result.items_seen,
+            "items_created": result.items_created,
+            "items_updated": result.items_updated,
+        },
+        attendance={"actions_prepared": result.actions_prepared},
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

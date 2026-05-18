@@ -7,17 +7,19 @@ Generates and delivers the daily pastoral briefing.
 Usage:
   python3 scripts/morning_briefing.py
 
-Environment variables required:
+Environment variables:
   DATABASE_URL      — SQLAlchemy connection string (default: sqlite:///./marge.db)
-  PASTOR_NAME       — Pastor's first name (default: Nathan)
-  CHURCH_NAME       — Church name (default: Hallmark Church)
+  MARGE_ACCOUNT_TOKEN, MARGE_ACCOUNT_ID, or MARGE_ACCOUNT_SLUG
+                    — Optional workspace selector for account-scoped briefings
+  PASTOR_NAME       — Legacy fallback pastor name (default: Pastor)
+  CHURCH_NAME       — Legacy fallback church name (default: your church)
 
 Optional (Telegram delivery):
   TELEGRAM_BOT_TOKEN  — Bot token from BotFather
   TELEGRAM_CHAT_ID    — Chat/user ID to send the briefing to
 
 Schedule via cron:
-  0 7 * * * cd /root/marge && python3 scripts/morning_briefing.py >> /var/log/marge_briefing.log 2>&1
+  0 7 * * * cd /root/marge && MARGE_ACCOUNT_SLUG=your-church .venv/bin/python scripts/morning_briefing.py >> /var/log/marge_briefing.log 2>&1
 """
 
 import os
@@ -32,7 +34,9 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 from app.database import SessionLocal, init_db
+from app.models import AccountPastorProfile, ChurchAccount
 from app.services.marge import generate_morning_briefing, render_briefing_text
+from app.services.accounts import account_access_from_token, account_id
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,8 +47,11 @@ logger = logging.getLogger("marge.briefing")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-PASTOR_NAME = os.getenv("PASTOR_NAME", "Nathan")
-CHURCH_NAME = os.getenv("CHURCH_NAME", "Hallmark Church")
+PASTOR_NAME = os.getenv("PASTOR_NAME", "").strip() or "Pastor"
+CHURCH_NAME = os.getenv("CHURCH_NAME", "").strip() or "your church"
+MARGE_ACCOUNT_TOKEN = os.getenv("MARGE_ACCOUNT_TOKEN", "")
+MARGE_ACCOUNT_ID = os.getenv("MARGE_ACCOUNT_ID", "")
+MARGE_ACCOUNT_SLUG = os.getenv("MARGE_ACCOUNT_SLUG", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -97,15 +104,45 @@ def send_telegram(text: str, bot_token: str, chat_id: str) -> bool:
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main():
-    logger.info("Marge morning briefing starting for %s at %s.", PASTOR_NAME, CHURCH_NAME)
+def _workspace_from_env(db):
+    if MARGE_ACCOUNT_TOKEN:
+        return account_access_from_token(db, MARGE_ACCOUNT_TOKEN).account
+    if MARGE_ACCOUNT_ID:
+        try:
+            return db.get(ChurchAccount, int(MARGE_ACCOUNT_ID))
+        except ValueError:
+            raise SystemExit("MARGE_ACCOUNT_ID must be an integer.")
+    if MARGE_ACCOUNT_SLUG:
+        return db.query(ChurchAccount).filter(ChurchAccount.slug == MARGE_ACCOUNT_SLUG).one_or_none()
+    return None
 
+
+def _briefing_identity(db, account):
+    if not account:
+        return PASTOR_NAME, CHURCH_NAME
+    profile = db.query(AccountPastorProfile).filter(AccountPastorProfile.account_id == account.id).first()
+    pastor_name = (profile.pastor_name if profile else None) or account.pastor_name or PASTOR_NAME
+    church_name = (profile.church_name if profile else None) or account.church_name or CHURCH_NAME
+    return pastor_name, church_name
+
+
+def main():
     # Initialize DB (creates tables if they don't exist)
     init_db()
 
     db = SessionLocal()
     try:
-        briefing = generate_morning_briefing(db, pastor_name=PASTOR_NAME, church_name=CHURCH_NAME)
+        account = _workspace_from_env(db)
+        if any([MARGE_ACCOUNT_TOKEN, MARGE_ACCOUNT_ID, MARGE_ACCOUNT_SLUG]) and not account:
+            raise SystemExit("Could not find the requested Marge workspace for this briefing.")
+        pastor_name, church_name = _briefing_identity(db, account)
+        logger.info("Marge morning briefing starting for %s at %s.", pastor_name, church_name)
+        briefing = generate_morning_briefing(
+            db,
+            pastor_name=pastor_name,
+            church_name=church_name,
+            account_id=account_id(account),
+        )
         text = render_briefing_text(briefing)
     finally:
         db.close()

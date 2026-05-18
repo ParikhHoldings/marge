@@ -114,13 +114,15 @@ def get_today_briefing(
     pastor_name = (
         (account_profile.pastor_name if account_profile else None)
         or (account.pastor_name if account else None)
-        or os.getenv("PASTOR_NAME", "Nathan")
+        or os.getenv("PASTOR_NAME")
+        or "Pastor"
     )
     pastor_name = _briefing_name(pastor_name)
     church_name = (
         (account_profile.church_name if account_profile else None)
         or (account.church_name if account else None)
-        or os.getenv("CHURCH_NAME", "your church")
+        or os.getenv("CHURCH_NAME")
+        or "your church"
     )
 
     stats = {

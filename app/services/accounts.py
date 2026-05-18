@@ -113,6 +113,11 @@ def require_role(access: AccountAccess, allowed_roles: set[str], action: str = "
         raise HTTPException(status_code=403, detail=f"Only {allowed} users can {action}.")
 
 
+def require_workspace(access: AccountAccess, action: str = "perform this action") -> None:
+    if access.account is None:
+        raise HTTPException(status_code=401, detail=f"Create or reconnect a Marge workspace before you {action}.")
+
+
 def scoped_query(query: Query, model, account: Optional[ChurchAccount]) -> Query:
     if not hasattr(model, "account_id"):
         return query

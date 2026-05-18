@@ -17,6 +17,11 @@ placeholder statuses:
   Marge memory or reviewable drafts without writing to external providers.
 - Generic mailbox and calendar sync prompts choose the connected provider from
   the workspace context instead of assuming Google.
+- The live-provider readiness counter only accepts fully verified external
+  provider responses; MCP, weak HTTP-200 responses, and secret-shaped identity
+  metadata do not count.
+- Live-provider readiness verification refuses to run unscoped without a
+  workspace token, even against a local API.
 
 Usage:
   .venv/bin/python scripts/smoke_connected_providers.py
@@ -26,8 +31,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+import tempfile
+from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
+from io import StringIO
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -35,6 +44,25 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from app.services.secure_tokens import decrypt_token_payload, generate_encryption_key
+from scripts import verify_live_integrations as live_verifier
+from scripts.verify_live_integrations import (
+    checked_local_bridges,
+    evidence_payload,
+    identity_has_signal,
+    identity_metadata_key_paths,
+    is_workspace_required_error,
+    is_local_api_url,
+    live_provider_next_actions,
+    live_provider_rerun_command,
+    print_human,
+    redact_sensitive_text,
+    sanitize_evidence_value,
+    snapshot_workspace,
+    validate_workspace_scope_for_live_provider,
+    verify_provider,
+    verified_external_providers,
+    workspace_token_message,
+)
 
 os.environ["MARGE_ENCRYPTION_KEY"] = generate_encryption_key()
 os.environ["MARGE_REQUIRE_ACCOUNT_TOKEN"] = "true"
@@ -47,6 +75,7 @@ os.environ["MICROSOFT_REDIRECT_URI"] = "http://testserver/assistant/integrations
 os.environ.pop("BREEZE_API_KEY", None)
 os.environ.pop("BREEZE_BASE_URL", None)
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.database import SessionLocal
@@ -101,6 +130,16 @@ def request_json_status(client: TestClient, method: str, path: str, token: str |
     except ValueError:
         body = response.text
     return response.status_code, body
+
+
+def ministry_record_snapshot(client: TestClient, token: str) -> dict[str, Any]:
+    return {
+        "members": request_json(client, "GET", "/members/?limit=100", token=token),
+        "visitors": request_json(client, "GET", "/visitors/?limit=100", token=token),
+        "care_cases": request_json(client, "GET", "/care/?limit=100", token=token),
+        "prayer_requests": request_json(client, "GET", "/care/prayers/?limit=100", token=token),
+        "connected_context": request_json(client, "GET", "/assistant/connected-items?limit=100", token=token),
+    }
 
 
 def cleanup_account(account_id: int) -> None:
@@ -333,12 +372,14 @@ def main() -> None:
                 json={
                     "pastor_name": "Pastor Connected Smoke",
                     "church_name": "Connected Provider Smoke Church",
+                    "email": "connected-provider@example.test",
                     "role_title": "Solo Pastor",
                     "congregation_size": "95",
                     "church_context": "Neighborhood church with new families and a thin care team.",
                     "faith_tradition": "Non-denominational with Baptist roots; use plain language with guests.",
                     "followup_pain": "Visitors, prayer requests, and hospital follow-up.",
                     "ministry_priorities": "Close loops with first-time guests and private prayer needs.",
+                    "support_preferences": "Nudge me gently and surface the people I am most likely to miss.",
                     "tools_in_use": "Planning Center, Microsoft 365, Breeze",
                     "communication_style": "warm and brief",
                     "weekly_rhythm": "Protect sermon prep Thursday mornings.",
@@ -355,6 +396,7 @@ def main() -> None:
                 json={
                     "pastor_name": "Pastor Rock Scope Smoke",
                     "church_name": "Rock Scope Smoke Church",
+                    "email": "rock-scope@example.test",
                 },
             )
             other_token = other_signup["token"]
@@ -409,13 +451,22 @@ def main() -> None:
                 assert_true(callback.status_code == 200, f"{provider} callback should succeed: {callback.text}")
                 assert_true(token_payloads[provider]["access_token"] not in callback.text, f"{provider} callback must not expose access tokens.")
                 assert_true(token_payloads[provider]["refresh_token"] not in callback.text, f"{provider} callback must not expose refresh tokens.")
+                assert_true("Check credentials before syncing ministry data" in callback.text, f"{provider} callback should tell pastors to check credentials before sync.")
 
             integrations = request_json(client, "GET", "/assistant/integrations", token=token)
             by_provider = {item["provider"]: item for item in integrations}
             assert_true(by_provider["planning_center"]["status"] == "connected", "Planning Center should report connected after OAuth callback.")
             assert_true(by_provider["planning_center"]["credential_scope"] == "user", "Planning Center OAuth should be user-scoped.")
+            assert_true(
+                "check credentials before syncing ministry data" in by_provider["planning_center"]["config_hint"].lower(),
+                "Unverified Planning Center status should keep the credential-check boundary visible.",
+            )
             assert_true(by_provider["microsoft_365"]["status"] == "connected", "Microsoft 365 should report connected after OAuth callback.")
             assert_true(by_provider["microsoft_365"]["credential_scope"] == "user", "Microsoft 365 OAuth should be user-scoped.")
+            assert_true(
+                "check credentials before syncing ministry data" in by_provider["microsoft_365"]["config_hint"].lower(),
+                "Unverified Microsoft 365 status should keep the credential-check boundary visible.",
+            )
             assert_true(by_provider["breeze"]["status"] == "configured", "Breeze should be configured from encrypted workspace credentials.")
             assert_true(by_provider["breeze"]["credential_scope"] == "workspace", "Breeze API-key credentials should be workspace-scoped.")
             integration_text = json.dumps(integrations)
@@ -450,6 +501,7 @@ def main() -> None:
             finally:
                 db.close()
 
+            pre_verify_ministry = ministry_record_snapshot(client, token)
             sync_before_verify = request_json(
                 client,
                 "POST",
@@ -471,19 +523,781 @@ def main() -> None:
                 token=token,
                 json={"message": "Check Planning Center credentials before syncing.", "mode": "live"},
             )
-            assert_true(chat_verification["intent"] == "integration_verified", "Chat should understand connector credential checks as a safe verify action.")
+            assert_true(
+                chat_verification["intent"] == "integration_verified",
+                f"Chat should understand connector credential checks as a safe verify action. Got: {json.dumps(chat_verification, default=str)}",
+            )
             assert_true("without syncing" in chat_verification["reply"].lower(), "Chat verification reply should say it did not sync ministry data.")
             assert_true("did not queue any actions" in chat_verification["reply"].lower(), "Chat verification should not pretend it prepared review work.")
             pco_after_chat_verify = next(item for item in request_json(client, "GET", "/assistant/integrations", token=token) if item["provider"] == "planning_center")
             assert_true(bool(pco_after_chat_verify["verified_at"]), "Chat verification should mark Planning Center as checked before sync.")
 
+            def fake_empty_breeze_get(path: str, params: dict | None = None, **kwargs):
+                normalized_path = path if path.startswith("/") else f"/{path}"
+                if normalized_path == "/people/":
+                    return []
+                return fake_breeze_get(path, params, **kwargs)
+
+            assistant_router._breeze_get = fake_empty_breeze_get
+            weak_breeze_verification = client.post(
+                "/assistant/integrations/breeze/verify",
+                headers={"X-Marge-Account-Token": token},
+                json={},
+            )
+            assert_true(
+                weak_breeze_verification.status_code == 502,
+                "Breeze verification should fail instead of marking credentials checked when no usable access signal is returned.",
+            )
+            assert_true(
+                "non-secret identity or permission metadata" in weak_breeze_verification.text,
+                "Weak provider verification should explain that no affirmative credential signal was returned.",
+            )
+            breeze_after_weak_verify = next(item for item in request_json(client, "GET", "/assistant/integrations", token=token) if item["provider"] == "breeze")
+            assert_true(
+                not breeze_after_weak_verify["verified_at"],
+                "Failed Breeze verification must not set verified_at.",
+            )
+            weak_breeze_chat_sync = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "Sync Breeze before staff meeting.", "mode": "live"},
+            )
+            assert_true(
+                weak_breeze_chat_sync["intent"] == "integration_verify_failed_before_sync",
+                "Chat sync should stop at a failed Breeze credential check instead of syncing.",
+            )
+            assert_true(
+                "safe credential check" in weak_breeze_chat_sync["reply"].lower()
+                and "no ministry data" in weak_breeze_chat_sync["reply"].lower(),
+                "Failed chat pre-sync verification should explain that no ministry data was imported.",
+            )
+            assert_true(
+                any(
+                    action.get("type") == "integration_setup"
+                    and action.get("provider") == "breeze"
+                    and action.get("action") == "Check credentials"
+                    for action in weak_breeze_chat_sync.get("actions", [])
+                ),
+                "Failed chat pre-sync verification should attach the Breeze credential-check card.",
+            )
+            assert_true(
+                not any(action.get("type") in {"email_draft", "pastoral_followup", "calendar_block", "person_review"} for action in weak_breeze_chat_sync.get("actions", [])),
+                "Failed chat pre-sync verification should not queue review actions.",
+            )
+            breeze_after_weak_chat = next(item for item in request_json(client, "GET", "/assistant/integrations", token=token) if item["provider"] == "breeze")
+            assert_true(
+                not breeze_after_weak_chat["verified_at"],
+                "Failed chat pre-sync verification must not mark Breeze as checked.",
+            )
+            assert_true(
+                request_json(client, "GET", "/assistant/connected-items?limit=100", token=token) == [],
+                "Failed chat pre-sync verification must not create connected context.",
+            )
+            assert_true(
+                assistant_router._redact_secret_text("apiKey=leaked-chat-secret bearer leakedbearertoken123456")
+                == "apiKey=<redacted> bearer <redacted>",
+                "Backend chat redactor should remove token-shaped provider failure text.",
+            )
+            original_verify_breeze = assistant_router._verify_breeze
+
+            def leaky_breeze_verify_failure(*_args, **_kwargs):
+                raise HTTPException(status_code=502, detail="Provider echoed apiKey=leaked-breeze-secret.")
+
+            try:
+                assistant_router._verify_breeze = leaky_breeze_verify_failure
+                leaky_breeze_chat_sync = request_json(
+                    client,
+                    "POST",
+                    "/assistant/chat",
+                    token=token,
+                    json={"message": "Sync Breeze before staff meeting.", "mode": "live"},
+                )
+            finally:
+                assistant_router._verify_breeze = original_verify_breeze
+
+            assert_true(
+                leaky_breeze_chat_sync["intent"] == "integration_verify_failed_before_sync",
+                "Chat sync should still stop at credential verification when provider failure text includes a secret.",
+            )
+            assert_true(
+                "leaked-breeze-secret" not in leaky_breeze_chat_sync["reply"]
+                and "apiKey=<redacted>" in leaky_breeze_chat_sync["reply"],
+                "Chat pre-sync verification failures should redact token-shaped provider error details.",
+            )
+            assistant_router._breeze_get = fake_breeze_get
+
+            verification_results = []
             for provider in ["planning_center", "microsoft_365", "breeze"]:
                 verification = request_json(client, "POST", f"/assistant/integrations/{provider}/verify", token=token, json={})
                 assert_true(verification["status"] == "verified", f"{provider} should verify without syncing ministry data.")
                 assert_true(bool(verification["identity"]), f"{provider} verification should return non-secret identity/config metadata.")
+                if provider == "breeze":
+                    assert_true(
+                        verification["identity"].get("people_access_confirmed") is True,
+                        "Breeze verification should expose a real credential-health label for people access.",
+                    )
+                    assert_true(
+                        "sample_people_access" not in verification["identity"],
+                        "Breeze verification metadata should not use sample/demo wording.",
+                    )
+                verification_results.append({
+                    "provider": provider,
+                    "ok": True,
+                    "status": verification["status"],
+                    "verified_at": verification["verified_at"],
+                    "identity_keys": sorted((verification.get("identity") or {}).keys()),
+                    "identity_signal": identity_has_signal(verification.get("identity") or {}),
+                })
+            assert_true(
+                len(verified_external_providers(verification_results)) == 3,
+                "Pilot live-provider readiness should count verified external church-tool providers.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "mcp",
+                    "ok": True,
+                    "kind": "local_agent_bridge",
+                    "status": "bridge_available",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["bridge_available"],
+                    "identity_signal": True,
+                }]),
+                "MCP bridge availability must not satisfy the live external-provider readiness requirement.",
+            )
+            mcp_bridge_result = {
+                "provider": "mcp",
+                "display_name": "MCP",
+                "ok": True,
+                "kind": "local_agent_bridge",
+                "status": "bridge_available",
+                "message": "MCP bridge checked for local LLM clients.",
+                "identity_keys": ["bridge_available"],
+                "identity_signal": True,
+            }
+            assert_true(
+                len(checked_local_bridges([mcp_bridge_result])) == 1,
+                "Live verifier evidence should count MCP separately as a local bridge check.",
+            )
+            mcp_only_evidence = evidence_payload(
+                "https://marge.example.com",
+                [mcp_bridge_result],
+                [],
+                None,
+                True,
+                ["Connect or configure at least one external provider."],
+            )
+            assert_true(
+                mcp_only_evidence["external_provider_checks"] == []
+                and mcp_only_evidence["local_bridge_checks"] == [mcp_bridge_result]
+                and mcp_only_evidence["external_verified_count"] == 0
+                and mcp_only_evidence["local_bridge_checked_count"] == 1
+                and mcp_only_evidence["live_provider_ready"] is False
+                and mcp_only_evidence["no_sync_side_effect_check_passed"] is None,
+                "Live verifier JSON evidence should split MCP bridge checks from external provider checks.",
+            )
+            assert_true(
+                isinstance(mcp_only_evidence.get("generated_at"), str)
+                and "T" in mcp_only_evidence["generated_at"]
+                and mcp_only_evidence["generated_at"].endswith("Z"),
+                "Live verifier JSON evidence should timestamp when the report was generated.",
+            )
+            redacted_text = redact_sensitive_text(
+                "access_token=secret-token apiKey=camel-secret clientSecret=client-secret "
+                "Authorization: Bearer eyJabcdefghijklmnopqrstuvwx.eyJabcdefghijklmnopqrstuvwx.signature123 "
+                "marge_sess_very-secret-session ya29.google-secret-token"
+            )
+            assert_true(
+                "secret-token" not in redacted_text
+                and "camel-secret" not in redacted_text
+                and "client-secret" not in redacted_text
+                and "very-secret-session" not in redacted_text
+                and "google-secret-token" not in redacted_text
+                and "<redacted" in redacted_text,
+                "Live verifier should redact obvious token-shaped strings before printing or saving evidence.",
+            )
+            leaky_evidence = evidence_payload(
+                "https://marge.example.com",
+                [{
+                    "provider": "planning_center",
+                    "display_name": "Planning Center",
+                    "ok": False,
+                    "kind": "external_provider",
+                    "status": "failed",
+                    "message": "Provider echoed api_key=leaked-key-value and bearer leakedbearertoken123456.",
+                    "identity_keys": [],
+                    "identity_signal": False,
+                }],
+                [],
+                None,
+                True,
+                ["Rerun with MARGE_ACCOUNT_TOKEN=marge_sess_leaked-session-token."],
+                error="Upstream returned client_secret=leaked-client-secret.",
+            )
+            leaky_evidence_json = json.dumps(leaky_evidence)
+            assert_true(
+                "leaked-key-value" not in leaky_evidence_json
+                and "leakedbearertoken" not in leaky_evidence_json
+                and "marge_sess_leaked" not in leaky_evidence_json
+                and "leaked-client-secret" not in leaky_evidence_json,
+                "Live verifier evidence payloads should redact secret-shaped values before writing JSON.",
+            )
+            assert_true(
+                sanitize_evidence_value({"message": "refreshToken=refresh-secret"})["message"] == "refreshToken=<redacted>",
+                "Live verifier recursive evidence sanitizer should redact nested secret-shaped strings.",
+            )
+            original_live_request_json_for_message = live_verifier.request_json
+
+            def leaky_success_request_json(method: str, url: str, token: str | None = None, payload: dict[str, Any] | None = None):
+                return 200, {
+                    "status": "verified",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity": {"email": "pastor@example.test"},
+                    "message": "Provider verified; access_token=leaked-success-token.",
+                }
+
+            try:
+                live_verifier.request_json = leaky_success_request_json
+                leaky_success_result = verify_provider("https://marge.example.com", "marge_sess_safe", "google_workspace", {
+                    "google_workspace": {"display_name": "Google Workspace"},
+                })
+            finally:
+                live_verifier.request_json = original_live_request_json_for_message
+
+            leaky_success_human = StringIO()
+            with redirect_stdout(leaky_success_human):
+                print_human("https://marge.example.com", [leaky_success_result], [])
+            assert_true(
+                "leaked-success-token" not in leaky_success_result["message"]
+                and "leaked-success-token" not in leaky_success_human.getvalue(),
+                "Live verifier should redact token-shaped values from successful provider messages before human output.",
+            )
+            external_ready_evidence = evidence_payload(
+                "https://marge.example.com",
+                [{
+                    "provider": "planning_center",
+                    "display_name": "Planning Center",
+                    "ok": True,
+                    "kind": "external_provider",
+                    "status": "verified",
+                    "message": "Planning Center credentials verified without syncing.",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["id"],
+                    "identity_signal": True,
+                    "sensitive_identity_keys": [],
+                }],
+                [],
+                {"ok": True},
+                True,
+                [],
+            )
+            assert_true(
+                external_ready_evidence["external_verified_count"] == 1
+                and external_ready_evidence["live_provider_ready"] is True
+                and external_ready_evidence["no_sync_side_effect_check_passed"] is True,
+                "Live verifier evidence should explicitly mark a verified external provider as ready only when no-sync checks pass.",
+            )
+            missing_side_effect_evidence = evidence_payload(
+                "https://marge.example.com",
+                external_ready_evidence["external_provider_checks"],
+                [],
+                None,
+                True,
+                ["Rerun without --skip-side-effect-check."],
+            )
+            assert_true(
+                missing_side_effect_evidence["external_verified_count"] == 1
+                and missing_side_effect_evidence["live_provider_ready"] is False
+                and missing_side_effect_evidence["no_sync_side_effect_check_passed"] is None,
+                "Live verifier evidence should not mark a provider ready unless the no-sync side-effect check ran.",
+            )
+            missing_side_effect_human = StringIO()
+            with redirect_stdout(missing_side_effect_human):
+                print_human(
+                    "https://marge.example.com",
+                    external_ready_evidence["external_provider_checks"],
+                    [],
+                    None,
+                )
+            assert_true(
+                "No-sync side-effect check: not run" in missing_side_effect_human.getvalue()
+                and "cannot prove live provider readiness" in missing_side_effect_human.getvalue(),
+                "Live verifier human output should say when side-effect proof is missing.",
+            )
+            side_effect_failure_evidence = evidence_payload(
+                "https://marge.example.com",
+                external_ready_evidence["external_provider_checks"],
+                [],
+                {"ok": False},
+                True,
+                ["Fix verify endpoints so Check credentials does not import context."],
+            )
+            assert_true(
+                side_effect_failure_evidence["external_verified_count"] == 1
+                and side_effect_failure_evidence["live_provider_ready"] is False
+                and side_effect_failure_evidence["no_sync_side_effect_check_passed"] is False,
+                "Live verifier evidence should not mark a provider ready if verification mutates workspace data.",
+            )
+            human_output = StringIO()
+            with redirect_stdout(human_output):
+                print_human("https://marge.example.com", [mcp_bridge_result], [])
+            human_text = human_output.getvalue()
+            assert_true(
+                "No external providers were verified." in human_text
+                and "Local agent bridge checks (not live providers):" in human_text
+                and "\nVerified:" not in human_text,
+                "Live verifier human output should not present MCP bridge checks as external provider verification.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "google_workspace",
+                    "ok": True,
+                    "status": "connected",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["email"],
+                }]),
+                "HTTP-200 connector responses without status=verified must not satisfy live-provider readiness.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "planning_center",
+                    "ok": True,
+                    "status": "verified",
+                    "identity_keys": ["id"],
+                }]),
+                "Connector responses without verified_at must not satisfy live-provider readiness.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "microsoft_365",
+                    "ok": True,
+                    "status": "verified",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": [],
+                }]),
+                "Connector responses without non-secret identity metadata must not satisfy live-provider readiness.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "breeze",
+                    "ok": True,
+                    "status": "verified",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["people_access_confirmed"],
+                    "identity_signal": False,
+                }]),
+                "Connector responses with only false credential-health metadata must not satisfy live-provider readiness.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "google_workspace",
+                    "ok": True,
+                    "status": "verified",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["email"],
+                }]),
+                "Connector readiness should require an explicit affirmative identity_signal from the verifier.",
+            )
+            assert_true(
+                identity_has_signal({"people_access_confirmed": False}) is False,
+                "False-only connector health metadata should not count as an affirmative identity signal.",
+            )
+            assert_true(
+                identity_has_signal({"messages_total": 0, "threads_total": 0}) is False,
+                "Zero-only numeric connector metadata should not count as an affirmative identity signal.",
+            )
+            assert_true(
+                assistant_router._identity_has_signal({"messages_total": 0, "threads_total": 0}) is False,
+                "Backend verification should reject zero-only numeric connector metadata.",
+            )
+            assert_true(
+                identity_has_signal({"messages_total": -1}) is False,
+                "Negative numeric connector metadata should not count as an affirmative identity signal.",
+            )
+            assert_true(
+                assistant_router._identity_has_signal({"messages_total": -1}) is False,
+                "Backend verification should reject negative numeric connector metadata.",
+            )
+            assert_true(
+                identity_has_signal({"email": "owner@example.test"}) is True,
+                "Non-empty non-secret identity metadata should count as an affirmative identity signal.",
+            )
+            assert_true(
+                identity_has_signal({"messages_total": 12}) is True,
+                "Positive numeric connector metadata can count as an affirmative signal.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "planning_center",
+                    "ok": True,
+                    "status": "verified",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["id", "access_token"],
+                }]),
+                "Connector responses with secret-shaped identity metadata must not satisfy live-provider readiness.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "planning_center",
+                    "ok": True,
+                    "status": "verified",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["profile"],
+                    "identity_key_paths": identity_metadata_key_paths({"profile": {"access_token": "leaked"}}),
+                }]),
+                "Connector responses with nested secret-shaped identity metadata must not satisfy live-provider readiness.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "google_workspace",
+                    "ok": True,
+                    "status": "verified",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["workspace_token"],
+                    "identity_signal": True,
+                }]),
+                "Connector responses with generic token-shaped identity keys must not satisfy live-provider readiness.",
+            )
+            assert_true(
+                not verified_external_providers([{
+                    "provider": "breeze",
+                    "ok": True,
+                    "status": "verified",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["apiKey"],
+                    "identity_signal": True,
+                }]),
+                "Connector responses with camelCase API-key identity metadata must not satisfy live-provider readiness.",
+            )
+            assert_true(
+                assistant_router._sensitive_identity_keys({
+                    "profile": {"access_token": "leaked"},
+                    "workspace_token": "leaked",
+                    "apiKey": "leaked",
+                    "email": "safe@example.test",
+                }) == ["apiKey", "profile.access_token", "workspace_token"],
+                "Backend verify responses should reject secret-shaped identity metadata before returning it.",
+            )
+            assert_true(
+                assistant_router._sensitive_identity_value_paths({
+                    "profile": {"email": "accessToken=leaked-token-value"},
+                    "nested": [{"message": "Bearer leakedbearertoken123456"}],
+                }) == ["nested[0].message", "profile.email"],
+                "Backend verify responses should reject secret-shaped identity values before returning them.",
+            )
+            original_verify_planning_center = assistant_router._verify_planning_center
+
+            def leaky_planning_center_identity(_token: str) -> dict:
+                return {"email": "apiKey=leaked-provider-token", "id": "safe-id"}
+
+            try:
+                assistant_router._verify_planning_center = leaky_planning_center_identity
+                leaky_identity_response = client.post(
+                    "/assistant/integrations/planning_center/verify",
+                    headers={"X-Marge-Account-Token": token},
+                    json={},
+                )
+            finally:
+                assistant_router._verify_planning_center = original_verify_planning_center
+
+            assert_true(
+                leaky_identity_response.status_code == 500,
+                "Backend verification should reject secret-shaped identity values before returning them to the browser.",
+            )
+            assert_true(
+                "profile.email" not in leaky_identity_response.text
+                and "leaked-provider-token" not in leaky_identity_response.text
+                and "email" in leaky_identity_response.text,
+                "Unsafe identity-value failures should name the field path without echoing the leaked value.",
+            )
+            no_live_provider_actions = live_provider_next_actions(
+                "https://marge.example.com",
+                {"google_workspace": {"display_name": "Google Workspace", "status": "planned"}},
+                [{
+                    "provider": "mcp",
+                    "display_name": "MCP",
+                    "ok": True,
+                    "kind": "local_agent_bridge",
+                    "status": "bridge_available",
+                    "verified_at": "2026-05-17T00:00:00",
+                    "identity_keys": ["bridge_available"],
+                    "identity_signal": True,
+                }],
+                [{"provider": "google_workspace", "status": "planned", "reason": "not connected/configured"}],
+                require_live_provider=True,
+                evidence_file="artifacts/live-connector-verification.json",
+            )
+            assert_true(
+                any("Connect or configure at least one external provider" in action for action in no_live_provider_actions),
+                "Live-provider verifier should tell operators to connect/configure a real external church tool.",
+            )
+            assert_true(
+                any("MCP does not count" in action for action in no_live_provider_actions),
+                "Live-provider verifier should keep the MCP-not-live-provider boundary visible.",
+            )
+            assert_true(
+                any("--include-mcp --require-live-provider" in action for action in no_live_provider_actions),
+                "Live-provider verifier should print the exact rerun command.",
+            )
+            assert_true(
+                any("--evidence-file artifacts/live-connector-verification.json" in action for action in no_live_provider_actions),
+                "Live-provider verifier rerun guidance should preserve the evidence file path.",
+            )
+            assert_true(
+                any("first sync" in action for action in no_live_provider_actions),
+                "Live-provider verifier should tell operators not to sync until credential checks pass.",
+            )
+            missing_side_effect_actions = live_provider_next_actions(
+                "https://marge.example.com",
+                {"planning_center": {"display_name": "Planning Center", "status": "connected"}},
+                external_ready_evidence["external_provider_checks"],
+                [],
+                require_live_provider=True,
+                side_effects=None,
+            )
+            assert_true(
+                any("--skip-side-effect-check" in action for action in missing_side_effect_actions),
+                "Live-provider verifier should not accept skipped no-sync side-effect evidence for readiness.",
+            )
+            assert_true(
+                is_workspace_required_error(401, {"detail": "Create or reconnect a Marge workspace before you verify connector credentials."}),
+                "Live verifier should recognize workspace-required API failures.",
+            )
+            assert_true(
+                not is_workspace_required_error(409, {"detail": "Connect this provider before checking credentials."}),
+                "Live verifier should not mislabel ordinary not-connected providers as missing workspace scope.",
+            )
+            workspace_actions = live_provider_next_actions(
+                "http://127.0.0.1:8000",
+                {},
+                [{
+                    "provider": "mcp",
+                    "display_name": "MCP",
+                    "ok": False,
+                    "status": "workspace_required",
+                }],
+                [],
+                require_live_provider=True,
+                evidence_file="artifacts/live-connector-verification.json",
+            )
+            assert_true(
+                any("Create or reconnect a real Marge workspace" in action for action in workspace_actions),
+                "Workspace-required live verification should tell operators to create or reconnect a workspace.",
+            )
+            assert_true(
+                any("MARGE_ACCOUNT_TOKEN" in action for action in workspace_actions),
+                "Workspace-required live verification should include the workspace token rerun path.",
+            )
+            assert_true(
+                any("--evidence-file artifacts/live-connector-verification.json" in action for action in workspace_actions),
+                "Workspace-required live verification rerun guidance should preserve the evidence file path.",
+            )
+            assert_true(
+                "scoped to that church" in workspace_token_message("http://127.0.0.1:8000"),
+                "Workspace-token guidance should explain why the token is required.",
+            )
+            assert_true(
+                "--evidence-file artifacts/live-connector-verification.json" in live_provider_rerun_command(
+                    "https://marge.example.com",
+                    "artifacts/live-connector-verification.json",
+                ),
+                "Live-provider rerun command helper should preserve evidence file paths.",
+            )
+            owner_scope_ok, owner_scope_message = validate_workspace_scope_for_live_provider({
+                "account_id": 42,
+                "slug": "smoke-church",
+                "church_name": "Smoke Church",
+                "current_role": "owner",
+            })
+            assert_true(owner_scope_ok and "owner access" in owner_scope_message, "Owner tokens should satisfy standalone live-provider verification role checks.")
+            staff_scope_ok, staff_scope_message = validate_workspace_scope_for_live_provider({
+                "account_id": 42,
+                "slug": "smoke-church",
+                "church_name": "Smoke Church",
+                "current_role": "staff",
+            })
+            assert_true(
+                not staff_scope_ok and "role=staff" in staff_scope_message,
+                "Standalone live-provider verification should reject staff tokens before provider checks.",
+            )
+            assert_true(is_local_api_url("http://127.0.0.1:8000"), "Live verifier should recognize local loopback URLs.")
+            assert_true(not is_local_api_url("https://marge.example.com"), "Live verifier should treat public HTTPS URLs as non-local.")
+
+            original_live_request_json = live_verifier.request_json
+            snapshot_calls = []
+            fake_rows = {
+                "/assistant/connected-items": [{"id": f"context-{index}", "value": index} for index in range(205)],
+                "/assistant/actions": [{"id": f"action-{index}", "value": index} for index in range(205)],
+                "/members/": [{"id": f"member-{index}", "value": index} for index in range(205)],
+                "/visitors/": [{"id": f"visitor-{index}", "value": index} for index in range(205)],
+                "/care/": [{"id": f"care-{index}", "value": index} for index in range(205)],
+                "/care/prayers/": [{"id": f"prayer-{index}", "value": index, "is_private": True} for index in range(205)],
+            }
+
+            def fake_live_request_json(method: str, url: str, token: str | None = None, payload: dict[str, Any] | None = None):
+                parsed = urlparse(url)
+                query = parse_qs(parsed.query)
+                snapshot_calls.append((parsed.path, query))
+                rows = fake_rows[parsed.path]
+                skip = int((query.get("skip") or ["0"])[0])
+                limit = int((query.get("limit") or ["200"])[0])
+                return 200, rows[skip:skip + limit]
+
+            try:
+                live_verifier.request_json = fake_live_request_json
+                paginated_snapshot = snapshot_workspace("https://marge.example.com", "marge_sess_snapshot")
+            finally:
+                live_verifier.request_json = original_live_request_json
+
+            assert_true(
+                all(detail["count"] == 205 for detail in paginated_snapshot.values()),
+                "Live verifier side-effect snapshots should read beyond the first 200 rows.",
+            )
+            assert_true(
+                any(path == "/assistant/connected-items" and query.get("skip") == ["200"] for path, query in snapshot_calls),
+                "Connected-context snapshot should request a second page instead of trusting the first page.",
+            )
+            assert_true(
+                any(path == "/assistant/actions" and query.get("skip") == ["200"] for path, query in snapshot_calls),
+                "Assistant-action snapshot should request a second page instead of trusting the first page.",
+            )
+            assert_true(
+                any(path == "/care/prayers/" and query.get("include_private") == ["true"] for path, query in snapshot_calls),
+                "Prayer snapshot should include private requests so verify side effects cannot hide there.",
+            )
+            assert_true(
+                all(query.get("limit") == ["200"] for _path, query in snapshot_calls),
+                "Live verifier snapshots should use the API's maximum page size for side-effect checks.",
+            )
+
+            def malformed_live_request_json(method: str, url: str, token: str | None = None, payload: dict[str, Any] | None = None):
+                return 200, [{"id": "valid-row"}, "not-an-object"]
+
+            malformed_snapshot_rejected = False
+            try:
+                live_verifier.request_json = malformed_live_request_json
+                try:
+                    snapshot_workspace("https://marge.example.com", "marge_sess_snapshot")
+                except RuntimeError as exc:
+                    malformed_snapshot_rejected = "expected JSON objects" in str(exc)
+            finally:
+                live_verifier.request_json = original_live_request_json
+
+            assert_true(
+                malformed_snapshot_rejected,
+                "Live verifier side-effect snapshots should reject malformed non-object rows.",
+            )
+
+            local_evidence = tempfile.NamedTemporaryFile(prefix="marge-live-verifier-", suffix=".json", delete=False)
+            local_evidence_path = local_evidence.name
+            local_evidence.close()
+            os.unlink(local_evidence_path)
+            local_require_live_guard = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/verify_live_integrations.py",
+                    "--api-url",
+                    "http://127.0.0.1:8000",
+                    "--include-mcp",
+                    "--require-live-provider",
+                    "--evidence-file",
+                    local_evidence_path,
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert_true(
+                local_require_live_guard.returncode == 2,
+                "Live-provider verification should require a workspace token even against local APIs.",
+            )
+            assert_true(
+                "MARGE_ACCOUNT_TOKEN is required" in local_require_live_guard.stderr,
+                "Local live-provider verification should explain that a workspace token is required.",
+            )
+            with open(local_evidence_path, "r", encoding="utf-8") as handle:
+                local_evidence_report = json.load(handle)
+            os.unlink(local_evidence_path)
+            assert_true(
+                local_evidence_report.get("required_live_provider") is True
+                and local_evidence_report.get("external_verified_count") == 0,
+                "Live verifier evidence files should preserve the failed live-provider gate status.",
+            )
+            assert_true(
+                local_evidence_report.get("live_provider_ready") is False
+                and local_evidence_report.get("no_sync_side_effect_check_passed") is None,
+                "Early live verifier evidence should explicitly report that no live provider is ready yet.",
+            )
+            assert_true(
+                local_evidence_report.get("external_provider_checks") == []
+                and local_evidence_report.get("local_bridge_checks") == [],
+                "Early live verifier evidence should include explicit typed check arrays.",
+            )
+            assert_true(
+                "marge_sess" not in json.dumps(local_evidence_report),
+                "Live verifier evidence files should not include workspace token values.",
+            )
+            assert_true(
+                any("MARGE_ACCOUNT_TOKEN is required" in action for action in local_evidence_report.get("next_actions", [])),
+                "Live verifier evidence files should preserve operator next actions.",
+            )
+            assert_true(
+                any(f"--evidence-file {local_evidence_path}" in action for action in local_evidence_report.get("next_actions", [])),
+                "Early live verifier evidence should preserve the requested evidence file path in rerun guidance.",
+            )
+            nonlocal_env = os.environ.copy()
+            nonlocal_env.pop("MARGE_ACCOUNT_TOKEN", None)
+            nonlocal_guard = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/verify_live_integrations.py",
+                    "--api-url",
+                    "https://marge.example.com",
+                    "--include-mcp",
+                    "--require-live-provider",
+                ],
+                cwd=ROOT,
+                env=nonlocal_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert_true(nonlocal_guard.returncode == 2, "Non-local live verification without a workspace token should fail before provider checks.")
+            assert_true(
+                "MARGE_ACCOUNT_TOKEN is required" in nonlocal_guard.stderr,
+                "Non-local live verification should explain that a workspace token is required.",
+            )
+            unavailable_guard = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/verify_live_integrations.py",
+                    "--api-url",
+                    "http://127.0.0.1:9",
+                    "--include-mcp",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert_true(unavailable_guard.returncode == 2, "Live verification should fail cleanly when the API is unreachable.")
+            assert_true(
+                "Could not list integrations" in unavailable_guard.stderr,
+                "Unreachable API failures should explain that integration status could not be listed.",
+            )
+            assert_true(
+                "Traceback" not in unavailable_guard.stderr,
+                "Unreachable API failures should not show a Python traceback to operators.",
+            )
 
             pre_sync_context = request_json(client, "GET", "/assistant/connected-items?limit=100", token=token)
             assert_true(pre_sync_context == [], "Safe verification should not create connected ministry context.")
+            assert_true(
+                ministry_record_snapshot(client, token) == pre_verify_ministry,
+                "Safe verification should not create or mutate local ministry records before sync.",
+            )
 
             pco_sync = request_json(client, "POST", "/assistant/integrations/planning_center/sync?people_limit=10&calendar_days=14", token=token, json={})
             assert_true(pco_sync["status"] == "synced", "Planning Center sync should complete.")
@@ -607,6 +1421,25 @@ def main() -> None:
             assert_true(
                 any(str(item.get("id", "")).startswith("action-") for item in pco_context.get("actions", [])),
                 "Connected context action cards should open queued review items directly.",
+            )
+            generic_connected_context = request_json(
+                client,
+                "POST",
+                "/assistant/chat",
+                token=token,
+                json={"message": "Show connected context.", "mode": "live"},
+            )
+            assert_true(
+                generic_connected_context["intent"] == "connected_context_lookup",
+                "Generic connected-context prompts should show synced review context.",
+            )
+            assert_true(
+                "connected tool context" in generic_connected_context["reply"],
+                "Generic connected-context copy should use readable pastor-facing wording.",
+            )
+            assert_true(
+                "connected-tool" not in generic_connected_context["reply"],
+                "Generic connected-context copy should not expose hyphenated implementation wording.",
             )
 
             synced_people = request_json(
@@ -826,6 +1659,10 @@ def main() -> None:
             "checked_providers": ["planning_center", "microsoft_365", "breeze"],
             "oauth_credentials": "encrypted_user_scoped",
             "safe_verification_without_sync": "verified",
+            "live_provider_readiness_counter": "verified",
+            "live_provider_no_sync_required": "verified",
+            "live_provider_workspace_token_guard": "verified",
+            "live_provider_workspace_role_guard": "verified",
             "chat_connector_verification": "verified",
             "chat_sync_precheck_verification": "verified",
             "planning_center_sync": "verified",

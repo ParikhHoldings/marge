@@ -31,13 +31,1053 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 BASE_URL = os.getenv("MARGE_API_URL", "http://127.0.0.1:8000").rstrip("/")
+
+
+def assert_empty_ai_briefing_prompt_is_honest() -> None:
+    from app.services import marge as marge_service
+
+    calls: list[str] = []
+    original_call_llm = marge_service._call_llm
+
+    def fake_call_llm(prompt: str, *, max_tokens: int = 400, temperature: float = 0.5):
+        calls.append(prompt)
+        if prompt == "Reply with the word ready.":
+            return "ready", "test"
+        return "Captured empty briefing.", "test"
+
+    empty_briefing = {
+        "birthdays_this_week": [],
+        "anniversaries_this_week": [],
+        "visitors_needing_followup": [],
+        "active_care_cases": [],
+        "absent_members": [],
+        "unanswered_prayers": [],
+        "nudges": [],
+    }
+
+    try:
+        marge_service._call_llm = fake_call_llm
+        marge_service.generate_ai_briefing(
+            empty_briefing,
+            pastor_name="Pastor First Run Smoke",
+            church_name="First Run Smoke Church",
+        )
+    finally:
+        marge_service._call_llm = original_call_llm
+
+    briefing_prompts = [prompt for prompt in calls if "Here is today's pastoral context:" in prompt]
+    assert_true(briefing_prompts, "AI briefing generation should send a briefing prompt when an LLM provider is ready.")
+    prompt = briefing_prompts[-1]
+    assert_true(
+        "No urgent pastoral needs flagged today" not in prompt,
+        "Empty AI briefing prompts should not claim no urgent needs were found before real context exists.",
+    )
+    assert_true(
+        "does not yet have real" in prompt
+        and "do not imply the flock has been fully checked" in prompt
+        and "Never invent people" in prompt,
+        "Empty AI briefing prompts should tell the LLM to be honest about missing real workspace context.",
+    )
+
+
+def assert_missing_name_briefing_fallbacks_are_pastoral() -> None:
+    from app.services import marge as marge_service
+
+    rendered = marge_service.render_briefing_text({
+        "greeting": "Good morning, Pastor.",
+        "birthdays_this_week": [],
+        "anniversaries_this_week": [],
+        "visitors_needing_followup": [],
+        "active_care_cases": [{"member_name": None, "category": "hospital", "last_contact": None}],
+        "absent_members": [],
+        "unanswered_prayers": [{
+            "submitted_by": None,
+            "request_text": "Please pray for a private family need.",
+            "created_at": datetime.utcnow(),
+        }],
+        "nudges": [],
+    })
+    assert_true(
+        "Unknown" not in rendered and "Anonymous" not in rendered,
+        "Rendered live briefings should not use placeholder names for unlinked care or prayer records.",
+    )
+    assert_true(
+        "Name not linked" in rendered and "Name withheld" in rendered,
+        "Rendered live briefings should describe missing names as incomplete or private context.",
+    )
+
+    calls: list[str] = []
+    original_call_llm = marge_service._call_llm
+
+    def fake_call_llm(prompt: str, *, max_tokens: int = 400, temperature: float = 0.5):
+        calls.append(prompt)
+        if prompt == "Reply with the word ready.":
+            return "ready", "test"
+        return "Captured missing-name briefing.", "test"
+
+    try:
+        marge_service._call_llm = fake_call_llm
+        marge_service.generate_ai_briefing(
+            {
+                "birthdays_this_week": [],
+                "anniversaries_this_week": [],
+                "visitors_needing_followup": [],
+                "active_care_cases": [
+                    SimpleNamespace(member=None, category="hospital", last_contact=None, description="Hospital follow-up.")
+                ],
+                "absent_members": [],
+                "unanswered_prayers": [
+                    SimpleNamespace(member=None, submitted_by=None, request_text="Please pray for a private family need.")
+                ],
+                "nudges": [],
+            },
+            pastor_name="Pastor First Run Smoke",
+            church_name="First Run Smoke Church",
+        )
+    finally:
+        marge_service._call_llm = original_call_llm
+
+    briefing_prompts = [prompt for prompt in calls if "Here is today's pastoral context:" in prompt]
+    assert_true(briefing_prompts, "AI briefing generation should send a briefing prompt for incomplete-name context.")
+    prompt = briefing_prompts[-1]
+    assert_true(
+        "Unknown" not in prompt and "Anonymous" not in prompt,
+        "AI briefing prompts should not use placeholder names for unlinked care or prayer records.",
+    )
+    assert_true(
+        "Name not linked" in prompt and "Name withheld" in prompt,
+        "AI briefing prompts should preserve incomplete/private-name language for unlinked records.",
+    )
+
+
+def assert_connected_email_fallbacks_are_pastoral() -> None:
+    from app.routers import assistant as assistant_router
+
+    triage = assistant_router._email_triage_description({"snippet": "Could we talk about a care need?"})
+    missing_preview_triage = assistant_router._email_triage_description({})
+    assert_true(
+        "Unknown sender" not in triage and "Sender not available" in triage,
+        "Synced inbox triage should describe a missing sender instead of using an Unknown placeholder.",
+    )
+    assert_true(
+        "No preview available" not in missing_preview_triage
+        and "No preview was included by the provider" in missing_preview_triage,
+        "Synced inbox triage should describe missing preview context as provider-incomplete context.",
+    )
+    assert_true(
+        assistant_router._recipient_first_name("") == "there",
+        "Connected email replies without a parsed sender should use a neutral greeting fallback.",
+    )
+    reply_body = assistant_router._connected_email_reply_body(
+        SimpleNamespace(pastor_name="Pastor First Run Smoke", church_name="First Run Smoke Church"),
+        "there",
+        "Pastoral care",
+        "Could we talk about a care need?",
+    )
+    assert_true(
+        "Hi friend" not in reply_body and "Hi there" in reply_body,
+        "Connected email reply drafts should not address missing sender context as friend.",
+    )
+
+
+def assert_connected_context_missing_payload_copy_is_pastoral() -> None:
+    from app.routers import assistant as assistant_router
+
+    care_case = SimpleNamespace(member=None, category="hospital", last_contact=None, description=None)
+    care_line = assistant_router._care_line(care_case)
+    care_summary = assistant_router._care_case_summary(care_case)
+    assert_true(
+        "Unknown person" not in care_line and "Name not linked" in care_line,
+        "Care context lines should describe an unlinked person instead of using an Unknown placeholder.",
+    )
+    assert_true(
+        "no description" not in care_line.lower()
+        and "no description" not in care_summary.lower()
+        and "description not attached yet" in care_line,
+        "Care context lines should describe missing descriptions as incomplete context.",
+    )
+
+    profile = SimpleNamespace(
+        pastor_name="Pastor First Run Smoke",
+        church_name="First Run Smoke Church",
+        church_context=None,
+        faith_tradition=None,
+        guardrails=None,
+    )
+    item = SimpleNamespace(title="Pastoral meeting", subtitle=None, snippet=None)
+    prep = assistant_router._connected_meeting_prep_text(profile, item, {})
+    assert_true(
+        "time not listed" not in prep.lower()
+        and "No description synced" not in prep
+        and "Use the pastor's saved ministry context" not in prep
+        and "Use the pastor's saved church voice" not in prep,
+        "Connected meeting prep should avoid stub-like missing calendar/profile wording.",
+    )
+    assert_true(
+        "Time was not included by the connected calendar" in prep
+        and "No description was included by the connected calendar" in prep
+        and "Ask the pastor for local ministry context" in prep,
+        "Connected meeting prep should explain missing provider/profile context honestly.",
+    )
+
+
+def assert_backend_name_fallbacks_do_not_create_unknown_people() -> None:
+    from app.database import SessionLocal
+    from app.integrations import rock as rock_integration
+    from app.models import Member
+    from app.routers import assistant as assistant_router
+
+    priority_items = assistant_router._priority_items({
+        "active_care_cases": [{"id": 1, "member_name": None, "category": "hospital", "last_contact": None}],
+        "visitors_needing_followup": [{"id": 2, "full_name": None, "visit_date": None, "notes": "Asked about kids ministry."}],
+        "absent_members": [{"id": 3, "full_name": None, "last_attendance": None}],
+    })
+    assert_true(
+        any(item.title == "Name not linked" for item in priority_items),
+        "Priority care items should use incomplete-context language instead of Unknown placeholders.",
+    )
+    assert_true(
+        any(item.title == "Visitor name not linked" for item in priority_items),
+        "Priority visitor items should describe missing names as incomplete context.",
+    )
+    assert_true(
+        any(item.title == "Member name not linked" for item in priority_items),
+        "Priority absence items should describe missing names as incomplete context.",
+    )
+
+    first_name, last_name = assistant_router._person_names_from_payload({"first_name": "Avery"})
+    assert_true(
+        first_name == "Avery" and last_name == "",
+        "Connected person imports with only a first name should not invent an Unknown last name.",
+    )
+
+    suffix = int(time.time() * 1000)
+    no_name_id = f"smoke-no-name-{suffix}"
+    last_only_id = f"smoke-last-only-{suffix}"
+    original_fetch = rock_integration.fetch_active_members
+
+    def fake_fetch_active_members(*, api_key: str | None = None, base_url: str | None = None):
+        return [
+            {"Id": no_name_id},
+            {"Id": last_only_id, "LastName": "Linked"},
+        ]
+
+    db = SessionLocal()
+    try:
+        rock_integration.fetch_active_members = fake_fetch_active_members
+        stats = rock_integration.sync_members_from_rock(
+            db,
+            account_id=None,
+            api_key="rock-smoke",
+            base_url="https://rock.example.test/api/v2",
+        )
+        linked_member = db.query(Member).filter(Member.rock_id == last_only_id).first()
+        skipped_member = db.query(Member).filter(Member.rock_id == no_name_id).first()
+        assert_true(
+            stats["created"] == 1 and stats["skipped"] == 1,
+            "Rock sync should skip no-name rows and only create usable person rows.",
+        )
+        assert_true(
+            linked_member is not None
+            and linked_member.first_name == ""
+            and linked_member.last_name == "Linked",
+            "Rock sync should preserve partial provider names without inventing Unknown.",
+        )
+        assert_true(skipped_member is None, "Rock sync should not create no-name placeholder people.")
+    finally:
+        rock_integration.fetch_active_members = original_fetch
+        db.query(Member).filter(Member.rock_id.in_([no_name_id, last_only_id])).delete(synchronize_session=False)
+        db.commit()
+        db.close()
+
+
+def assert_calendar_provider_not_ready_prompts_match_setup_state() -> None:
+    from app.routers import assistant as assistant_router
+
+    unconfigured_steps = assistant_router._calendar_write_setup_steps([
+        assistant_router.IntegrationStatus(
+            provider="google_workspace",
+            display_name="Google Workspace",
+            status="not_configured",
+            auth_type="oauth",
+            scopes=[],
+            secure_note="Start OAuth setup.",
+        ),
+        assistant_router.IntegrationStatus(
+            provider="microsoft_365",
+            display_name="Microsoft 365",
+            status="not_configured",
+            auth_type="oauth",
+            scopes=[],
+            secure_note="Start OAuth setup.",
+        ),
+    ])
+    unconfigured_prompts = assistant_router._connector_setup_or_check_prompts(unconfigured_steps)
+    assert_true(
+        unconfigured_steps and unconfigured_steps[0].action == "Start secure setup",
+        "Calendar write setup should start with secure setup when no calendar connector is configured.",
+    )
+    assert_true(
+        "Check Google Workspace credentials." not in unconfigured_prompts
+        and any("Connect Google Workspace" in prompt for prompt in unconfigured_prompts),
+        "Provider-not-ready calendar prompts should not suggest credential checks before setup exists.",
+    )
+
+    unchecked_steps = assistant_router._calendar_write_setup_steps([
+        assistant_router.IntegrationStatus(
+            provider="google_workspace",
+            display_name="Google Workspace",
+            status="connected",
+            auth_type="oauth",
+            scopes=[],
+            secure_note="Google Workspace connected.",
+        )
+    ])
+    unchecked_prompts = assistant_router._connector_setup_or_check_prompts(unchecked_steps)
+    assert_true(
+        unchecked_steps and unchecked_steps[0].action == "Check credentials",
+        "Calendar write setup should ask for a credential check when the connector exists but is unchecked.",
+    )
+    assert_true(
+        "Check Google Workspace credentials." in unchecked_prompts,
+        "Provider-not-ready calendar prompts should suggest credential checks once setup exists.",
+    )
+
+    example_prompt = "Queue a calendar event for hospital follow-up on 2026-05-18 at 3pm."
+    unconfigured_help_prompts = assistant_router._calendar_help_suggested_prompts(example_prompt, unconfigured_steps)
+    unchecked_help_prompts = assistant_router._calendar_help_suggested_prompts(example_prompt, unchecked_steps)
+    assert_true(
+        unconfigured_help_prompts[0] == example_prompt,
+        "Calendar details help should keep the concrete event example as the first prompt chip.",
+    )
+    assert_true(
+        any("Connect Google Workspace" in prompt for prompt in unconfigured_help_prompts)
+        and "Check Google Workspace credentials." not in unconfigured_help_prompts,
+        "Calendar details help should suggest secure setup before credential checks when no calendar connector exists.",
+    )
+    assert_true(
+        "Check Google Workspace credentials." in unchecked_help_prompts,
+        "Calendar details help should suggest credential checks after calendar setup exists.",
+    )
+
+
+def assert_generic_email_calendar_setup_phrasing_routes_to_connector_setup() -> None:
+    from app.routers import assistant as assistant_router
+
+    for phrase in [
+        "connect my email",
+        "set up my mail",
+        "connect my mailbox",
+        "set up my inbox",
+        "connect my calendar",
+        "set up my schedule",
+    ]:
+        assert_true(
+            assistant_router._connector_setup_requested(phrase),
+            f"Generic setup phrase should route to secure connector setup: {phrase}",
+        )
+        assert_true(
+            assistant_router._provider_from_chat(phrase) is None,
+            f"Generic setup phrase should leave provider choice to saved ministry tools: {phrase}",
+        )
+
+    unconfigured_integrations = [
+        assistant_router.IntegrationStatus(
+            provider="google_workspace",
+            display_name="Google Workspace",
+            status="not_configured",
+            auth_type="oauth",
+            scopes=[],
+            secure_note="Start OAuth setup.",
+        ),
+        assistant_router.IntegrationStatus(
+            provider="microsoft_365",
+            display_name="Microsoft 365",
+            status="not_configured",
+            auth_type="oauth",
+            scopes=[],
+            secure_note="Start OAuth setup.",
+        ),
+    ]
+    gmail_profile = SimpleNamespace(
+        tools_in_use="Gmail",
+        followup_pain="Visitor follow-up happens through email.",
+        ministry_priorities="Close loops with first-time guests.",
+        church_context="Neighborhood church.",
+    )
+    outlook_profile = SimpleNamespace(
+        tools_in_use="Outlook calendar",
+        followup_pain="Scheduling care visits is hard to keep current.",
+        ministry_priorities="Protect care appointments.",
+        church_context="Multi-site church.",
+    )
+    assert_true(
+        assistant_router._next_setup_provider(gmail_profile, unconfigured_integrations) == "google_workspace",
+        "Generic email setup should use saved Gmail context to recommend Google Workspace.",
+    )
+    assert_true(
+        assistant_router._next_setup_provider(outlook_profile, unconfigured_integrations) == "microsoft_365",
+        "Generic calendar setup should use saved Outlook context to recommend Microsoft 365.",
+    )
+
+    complete_profile = SimpleNamespace(
+        pastor_name="Pastor Smoke",
+        church_name="Smoke Church",
+        role_title="Lead pastor",
+        congregation_size="100",
+        church_context="Neighborhood church.",
+        faith_tradition="Baptist roots.",
+        followup_pain="Care follow-up.",
+        ministry_priorities="Protect care.",
+        support_preferences="Nudge gently.",
+        tools_in_use="Not sure which system to connect first.",
+        communication_style="Warm and brief.",
+        weekly_rhythm="Staff meeting Monday.",
+        guardrails="Ask before sending.",
+    )
+    first_tool_steps = assistant_router._setup_steps(complete_profile, unconfigured_integrations)
+    assert_true(
+        first_tool_steps
+        and first_tool_steps[0].title == "Connect the first ministry tool"
+        and "Microsoft 365" in first_tool_steps[0].subtitle,
+        "Generic first-tool setup should include Microsoft 365 alongside other supported live providers.",
+    )
+    tools_question = next(item for item in assistant_router.ONBOARDING_QUESTIONS if item["id"] == "tools_in_use")
+    assert_true(
+        "Gmail/Google Workspace" in tools_question["placeholder"]
+        and "Outlook/Microsoft 365" in tools_question["placeholder"],
+        "Tools onboarding placeholder should name the actual Google Workspace and Microsoft 365 connectors while preserving pastor-friendly aliases.",
+    )
+    assert_true(
+        assistant_router._extract_known_tools("we use gmail and google workspace") == "Gmail/Google Workspace",
+        "Tool extraction should not duplicate Gmail and Google Workspace as separate saved tools.",
+    )
+    assert_true(
+        assistant_router._extract_known_tools("we use outlook and microsoft 365") == "Outlook/Microsoft 365",
+        "Tool extraction should not duplicate Outlook and Microsoft 365 as separate saved tools.",
+    )
+    assert_true(
+        assistant_router._extract_known_tools("planning center and gmail")
+        == "Planning Center, Gmail/Google Workspace",
+        "Tool extraction should preserve Planning Center while canonicalizing Gmail to its connector.",
+    )
+    assert_true(
+        assistant_router._ministry_learning_gaps_requested("what should i include for tools?"),
+        "Neutral onboarding guidance prompts should route to the context-question explanation branch.",
+    )
+
+
+def assert_seed_context_uses_current_user_for_connector_state() -> None:
+    from app.routers import assistant as assistant_router
+
+    profile = SimpleNamespace(
+        pastor_name=None,
+        church_name="First Run Smoke Church",
+        role_title=None,
+        congregation_size=None,
+        church_context=None,
+        faith_tradition=None,
+        followup_pain=None,
+        ministry_priorities=None,
+        support_preferences=None,
+        tools_in_use=None,
+        communication_style=None,
+        weekly_rhythm=None,
+        guardrails=None,
+    )
+    user = SimpleNamespace(id=4321)
+    calls: list[Any] = []
+    original_integration_statuses = assistant_router._integration_statuses
+    original_seed_context_step = assistant_router._seed_context_step
+
+    def fake_integration_statuses(db, account=None, current_user=None):
+        calls.append(current_user)
+        return []
+
+    try:
+        assistant_router._integration_statuses = fake_integration_statuses
+        assistant_router._seed_context_step(SimpleNamespace(), None, profile, "demo", user)
+        assert_true(
+            calls and calls[-1] is user,
+            "Seed-context setup guidance should compute connector state for the current workspace user.",
+        )
+    finally:
+        assistant_router._integration_statuses = original_integration_statuses
+
+    seed_users: list[Any] = []
+
+    def fake_seed_context_step(db, account, current_profile, effective_mode, current_user=None):
+        seed_users.append(current_user)
+        return assistant_router.DeskItem(
+            id="setup-seed-first-people",
+            type="data_seed",
+            title="Log the first real visitor",
+            subtitle="Add one real visitor.",
+            priority="high",
+            action="Log the first real visitor",
+            source="seed",
+            form="visitor",
+        )
+
+    try:
+        assistant_router._seed_context_step = fake_seed_context_step
+        response = assistant_router._missing_visitor_name_response(SimpleNamespace(), None, profile, "live", user)
+        assert_true(
+            seed_users and seed_users[-1] is user,
+            "Missing-visitor-name guidance should preserve the current user when attaching setup cards.",
+        )
+        assert_true(
+            response.get("actions") and response["actions"][0].form == "visitor",
+            "Missing-visitor-name guidance should still attach the visitor setup card.",
+        )
+    finally:
+        assistant_router._seed_context_step = original_seed_context_step
+
+
+def assert_pastoral_reminder_chat_queues_local_action() -> None:
+    from app.database import SessionLocal
+    from app.models import AssistantAction, Member
+    from app.routers import assistant as assistant_router
+
+    suffix = int(time.time() * 1000)
+    db = SessionLocal()
+    account_id: int | None = None
+    try:
+        account, _token, profile, user = assistant_router._create_account(
+            db,
+            assistant_router.AccountSignupRequest(
+                pastor_name="Pastor Reminder Smoke",
+                church_name=f"Reminder Smoke Church {suffix}",
+                email=f"reminder-smoke-{suffix}@example.test",
+            ),
+        )
+        db.commit()
+        db.refresh(account)
+        db.refresh(profile)
+        db.refresh(user)
+        account_id = account.id
+        profile.role_title = "Solo Pastor"
+        profile.congregation_size = "85"
+        profile.church_context = "Neighborhood church with young families."
+        profile.faith_tradition = "Non-denominational; plain language."
+        profile.followup_pain = "Care follow-up can go quiet."
+        profile.ministry_priorities = "Keep active care visible."
+        profile.support_preferences = "Nudge me gently and protect my rest."
+        profile.tools_in_use = "Planning Center, Gmail"
+        profile.communication_style = "warm and brief"
+        profile.weekly_rhythm = "Thursdays are sermon prep."
+        profile.guardrails = "Ask me before sending anything."
+        profile.onboarding_complete = True
+        db.commit()
+        member = Member(
+            account_id=account.id,
+            first_name="Janet",
+            last_name="Ellis",
+            email="janet.ellis@example.test",
+        )
+        db.add(member)
+        db.commit()
+        response = assistant_router._pastoral_reminder_chat_response(
+            db,
+            profile,
+            account,
+            "Remind me to call Janet Ellis tomorrow.",
+            "remind me to call janet ellis tomorrow.",
+            "live",
+        )
+        assert_true(
+            response.intent == "pastoral_reminder_queued" and response.saved,
+            "Reminder chat should queue a saved local assistant action.",
+        )
+        assert_true(
+            "Nothing was sent, synced, or written" in response.reply,
+            "Reminder chat should preserve the no-external-write boundary.",
+        )
+        assert_true(
+            response.actions and response.actions[0].type == "pastoral_reminder",
+            "Reminder chat should return a visible pastoral reminder card.",
+        )
+        action = db.query(AssistantAction).filter(
+            AssistantAction.account_id == account.id,
+            AssistantAction.action_type == "pastoral_reminder",
+        ).one()
+        assert_true(action.status == "pending", "Pastoral reminders should remain reviewable until the pastor marks them done.")
+        assert_true(action.external_provider is None, "Pastoral reminders should not target an external provider.")
+        payload = json.loads(action.payload_json or "{}")
+        reminder = payload.get("reminder") or {}
+        assert_true(
+            reminder.get("member_id") == member.id
+            and reminder.get("person_name") == "Janet Ellis"
+            and reminder.get("due") == "tomorrow",
+            "Pastoral reminder payload should link known local people and preserve timing context.",
+        )
+        lookup = assistant_router._pastoral_reminder_lookup_response(db, profile, account, "live")
+        assert_true(
+            lookup.intent == "pastoral_reminder_lookup"
+            and "call Janet Ellis" in lookup.reply
+            and "local Marge memory" in lookup.reply
+            and lookup.actions
+            and lookup.actions[0].type == "pastoral_reminder",
+            "Reminder lookup should list pending local pastoral reminders with visible action cards.",
+        )
+        command = assistant_router._maybe_handle_action_command(
+            db,
+            account,
+            user,
+            profile,
+            [],
+            "Mark Janet reminder done.",
+            "mark janet reminder done.",
+            "live",
+        )
+        db.refresh(action)
+        payload = json.loads(action.payload_json or "{}")
+        execution = payload.get("execution") or {}
+        assert_true(
+            command is not None
+            and command.intent == "assistant_action_executed"
+            and action.status == "executed"
+            and execution.get("kind") == "pastoral_reminder_completed",
+            "Reminder completion from chat should mark local pastoral reminders done without requiring a separate approval.",
+        )
+        empty_lookup = assistant_router._pastoral_reminder_lookup_response(db, profile, account, "live")
+        assert_true(
+            "do not see any pending local pastoral reminders" in empty_lookup.reply,
+            "Completed pastoral reminders should leave the pending reminder lookup.",
+        )
+        cancel_response = assistant_router._pastoral_reminder_chat_response(
+            db,
+            profile,
+            account,
+            "Remind me to text Janet Ellis next week.",
+            "remind me to text janet ellis next week.",
+            "live",
+        )
+        assert_true(cancel_response.intent == "pastoral_reminder_queued", "Reminder smoke should queue a second local reminder for cancel coverage.")
+        cancel_action = db.query(AssistantAction).filter(
+            AssistantAction.account_id == account.id,
+            AssistantAction.action_type == "pastoral_reminder",
+            AssistantAction.status == "pending",
+        ).one()
+        reschedule_command = assistant_router._maybe_handle_action_command(
+            db,
+            account,
+            user,
+            profile,
+            [],
+            "Move Janet reminder to Friday.",
+            "move janet reminder to friday.",
+            "live",
+        )
+        db.refresh(cancel_action)
+        rescheduled_payload = json.loads(cancel_action.payload_json or "{}")
+        assert_true(
+            reschedule_command is not None
+            and reschedule_command.intent == "pastoral_reminder_rescheduled"
+            and (rescheduled_payload.get("reminder") or {}).get("due") == "Friday"
+            and "Nothing was sent, synced, or written externally" in reschedule_command.reply,
+            "Reminder reschedule chat should update local reminder timing without writing externally.",
+        )
+        snooze_command = assistant_router._maybe_handle_action_command(
+            db,
+            account,
+            user,
+            profile,
+            [],
+            "Snooze it in two weeks.",
+            "snooze it in two weeks.",
+            "live",
+        )
+        db.refresh(cancel_action)
+        snoozed_payload = json.loads(cancel_action.payload_json or "{}")
+        assert_true(
+            snooze_command is not None
+            and snooze_command.intent == "pastoral_reminder_rescheduled"
+            and (snoozed_payload.get("reminder") or {}).get("due") == "in two weeks",
+            "Generic reminder snooze phrasing should update the selected local reminder timing.",
+        )
+        cancel_command = assistant_router._maybe_handle_action_command(
+            db,
+            account,
+            user,
+            profile,
+            [],
+            "Cancel Janet reminder.",
+            "cancel janet reminder.",
+            "live",
+        )
+        db.refresh(cancel_action)
+        assert_true(
+            cancel_command is not None
+            and cancel_command.intent == "assistant_action_skipped"
+            and cancel_action.status == "skipped",
+            "Reminder cancel chat should skip the matching local pastoral reminder.",
+        )
+    finally:
+        db.close()
+        if account_id is not None:
+            cleanup_account(account_id)
+
+
+def assert_remembered_member_preferences_save_local_memory() -> None:
+    from app.database import SessionLocal
+    from app.models import CareNote, Member, MemberNote
+    from app.routers import assistant as assistant_router
+
+    suffix = int(time.time() * 1000)
+    db = SessionLocal()
+    account_id: int | None = None
+    try:
+        account, _token, profile, user = assistant_router._create_account(
+            db,
+            assistant_router.AccountSignupRequest(
+                pastor_name="Pastor Memory Smoke",
+                church_name=f"Memory Smoke Church {suffix}",
+                email=f"memory-smoke-{suffix}@example.test",
+            ),
+        )
+        db.commit()
+        db.refresh(account)
+        db.refresh(profile)
+        db.refresh(user)
+        account_id = account.id
+        profile.role_title = "Solo Pastor"
+        profile.congregation_size = "85"
+        profile.church_context = "Neighborhood church with young families."
+        profile.faith_tradition = "Non-denominational; plain language."
+        profile.followup_pain = "Care follow-up can go quiet."
+        profile.ministry_priorities = "Keep active care visible."
+        profile.support_preferences = "Nudge me gently and protect my rest."
+        profile.tools_in_use = "Planning Center, Gmail"
+        profile.communication_style = "warm and brief"
+        profile.weekly_rhythm = "Thursdays are sermon prep."
+        profile.guardrails = "Ask me before sending anything."
+        profile.onboarding_complete = True
+        db.commit()
+        member = Member(
+            account_id=account.id,
+            first_name="Janet",
+            last_name="Ellis",
+            email="janet.ellis@example.test",
+        )
+        db.add(member)
+        db.commit()
+        message = "Remember that Janet Ellis prefers phone calls over texts."
+        result = assistant_router._maybe_save_pastoral_update(
+            db,
+            profile,
+            account,
+            user,
+            message,
+            message.lower(),
+            "live",
+        )
+        assert_true(
+            result and result.get("intent") == "member_note_logged" and result.get("saved"),
+            "Remember-that preference phrasing should save a local member note instead of falling through.",
+        )
+        note = db.query(MemberNote).filter(MemberNote.account_id == account.id, MemberNote.member_id == member.id).one()
+        assert_true(
+            note.context_tag == "preference" and "phone calls over texts" in note.note_text,
+            "Remembered preferences should be tagged and preserved in local Marge memory.",
+        )
+        assert_true(
+            "Janet Ellis" in result.get("reply", "") and result.get("actions"),
+            "Remembered preference replies should name the real local person and return a visible note card.",
+        )
+        context = assistant_router._person_context_chat_response(
+            db,
+            profile,
+            account,
+            "What do you know about Janet Ellis?",
+            "what do you know about janet ellis?",
+            "live",
+        )
+        assert_true(
+            context.intent == "person_context_lookup"
+            and "Preferences to respect" in context.reply
+            and "phone calls over texts" in context.reply,
+            "Person context lookups should surface remembered preferences distinctly.",
+        )
+        care = CareNote(
+            account_id=account.id,
+            member_id=member.id,
+            category="general",
+            description="Pastoral check-in after a difficult month.",
+            status="active",
+        )
+        db.add(care)
+        db.commit()
+        db.refresh(care)
+        natural_contact = assistant_router.assistant_chat(
+            assistant_router.AssistantChatRequest(
+                message="I just got back from visiting Janet Ellis at home.",
+                mode="live",
+            ),
+            x_marge_account_token=_token,
+            db=db,
+        )
+        assert_true(
+            natural_contact.intent == "pastoral_contact_logged"
+            and natural_contact.saved
+            and "Janet Ellis" in natural_contact.reply
+            and "reset the care follow-up timer" in natural_contact.reply,
+            "Natural post-visit language should save a pastoral contact through chat.",
+        )
+        assert_true(
+            any(action.type == "care" and action.title == "Janet Ellis" for action in natural_contact.actions),
+            "Natural post-visit contact logging should return the linked care card.",
+        )
+        contact_result = assistant_router._save_contact_from_chat(
+            db,
+            account,
+            profile,
+            "Log that I visited Janet Ellis today.",
+            "Janet Ellis",
+        )
+        contact_prompts = contact_result.get("suggested_prompts") or []
+        assert_true(
+            contact_result.get("intent") == "pastoral_contact_logged"
+            and "local reminder" in contact_result.get("reply", "").lower()
+            and f"Remind me to check on Janet Ellis next week." in contact_prompts,
+            "Contact logging should proactively suggest a local next-check-in reminder.",
+        )
+        last_visit = assistant_router.assistant_chat(
+            assistant_router.AssistantChatRequest(
+                message="When did I last visit Janet Ellis?",
+                mode="live",
+            ),
+            x_marge_account_token=_token,
+            db=db,
+        )
+        ruth = Member(
+            account_id=account.id,
+            first_name="Ruth",
+            last_name="Carter",
+            email="ruth.carter@example.test",
+        )
+        db.add(ruth)
+        db.commit()
+        db.add(CareNote(
+            account_id=account.id,
+            member_id=ruth.id,
+            category="grief",
+            description="Recent grief follow-up with no latest contact logged.",
+            status="active",
+        ))
+        db.commit()
+        assert_true(
+            last_visit.intent == "person_context_lookup"
+            and "Active care" in last_visit.reply
+            and "last contact" in last_visit.reply
+            and (
+                "Log that I visited Janet Ellis today" in last_visit.reply
+                or "I just got back from visiting Janet Ellis" in last_visit.reply
+            ),
+            "Last-visit questions should answer from person/care memory instead of generic calendar planning.",
+        )
+        check_next = assistant_router.assistant_chat(
+            assistant_router.AssistantChatRequest(
+                message="Who should I check on next?",
+                mode="live",
+            ),
+            x_marge_account_token=_token,
+            db=db,
+        )
+        assert_true(
+            check_next.intent == "next_action"
+            and "Janet Ellis" in check_next.reply
+            and any(action.title == "Janet Ellis" for action in check_next.actions),
+            "Natural who-to-check-on questions should route to next-action triage from ministry context.",
+        )
+        assert_true(
+            "Draft a care follow-up for Janet Ellis." in check_next.suggested_prompts
+            and "Remind me to check on Janet Ellis next week." in check_next.suggested_prompts,
+            "Who-to-check-on follow-up prompts should carry the named person forward.",
+        )
+        draft_action = assistant_router._prepare_single_followup_draft_action(
+            db,
+            profile,
+            account,
+            assistant_router._care_desk_item(care),
+            "live",
+        )
+        draft_payload = assistant_router._json_loads(draft_action.payload_json)
+        draft_context = draft_payload.get("draft_context") or {}
+        draft_preferences = draft_context.get("member_preferences") or []
+        draft_member_context = draft_context.get("member_context") or []
+        draft_body = ((draft_payload.get("email") or {}).get("body") or "").lower()
+        assert_true(
+            draft_context.get("member_name") == "Janet Ellis"
+            and any("phone calls over texts" in (preference.get("text") or "") for preference in draft_preferences)
+            and "Pastor-only review context" in (draft_context.get("member_preference_guardrail") or ""),
+            "Care follow-up drafts should carry remembered member preferences in review metadata.",
+        )
+        assert_true(
+            "phone calls over texts" not in draft_body,
+            "Remembered preferences should not be pasted into sendable draft bodies by default.",
+        )
+        assert_true(
+            any(
+                row.get("member_name") == "Janet Ellis"
+                and any("difficult month" in text for text in row.get("active_care") or [])
+                for row in draft_member_context
+            ),
+            "Care follow-up drafts should carry active local care context in review metadata.",
+        )
+        connected_item, _created = assistant_router._upsert_connected_item(
+            db,
+            provider="google_workspace",
+            item_type="email",
+            external_id=f"preference-email-{suffix}",
+            thread_id=f"preference-thread-{suffix}",
+            title="Prayer update",
+            subtitle='"Janet Ellis" <janet.ellis@example.test>',
+            snippet="Could use a quick pastoral follow-up.",
+            occurred_at=datetime.utcnow(),
+            payload={
+                "email": {
+                    "id": f"preference-email-{suffix}",
+                    "thread_id": f"preference-thread-{suffix}",
+                    "from": '"Janet Ellis" <janet.ellis@example.test>',
+                    "subject": "Prayer update",
+                    "snippet": "Could use a quick pastoral follow-up.",
+                }
+            },
+            account=account,
+        )
+        connected_draft = assistant_router._prepare_email_reply_from_connected_item(
+            db,
+            profile,
+            connected_item,
+            account,
+        )
+        connected_payload = assistant_router._json_loads(connected_draft.payload_json)
+        connected_context = connected_payload.get("draft_context") or {}
+        connected_preferences = connected_context.get("member_preferences") or []
+        connected_member_context = connected_context.get("member_context") or []
+        connected_body = ((connected_payload.get("email") or {}).get("body") or "").lower()
+        assert_true(
+            connected_context.get("member_name") == "Janet Ellis"
+            and any("phone calls over texts" in (preference.get("text") or "") for preference in connected_preferences),
+            "Connected inbox reply drafts should attach local member preferences when the sender matches Marge people memory.",
+        )
+        assert_true(
+            "phone calls over texts" not in connected_body,
+            "Connected inbox reply bodies should not expose remembered preferences by default.",
+        )
+        assert_true(
+            any(
+                row.get("member_name") == "Janet Ellis"
+                and any("difficult month" in text for text in row.get("active_care") or [])
+                for row in connected_member_context
+            ),
+            "Connected inbox reply drafts should attach active local care context when the sender matches Marge people memory.",
+        )
+        calendar_item, _created = assistant_router._upsert_connected_item(
+            db,
+            provider="google_workspace",
+            item_type="calendar_event",
+            external_id=f"preference-calendar-{suffix}",
+            thread_id=None,
+            title="Care check-in with Janet Ellis",
+            subtitle="Tomorrow at 10:00 AM",
+            snippet="Pastoral care conversation.",
+            occurred_at=datetime.utcnow(),
+            payload={
+                "calendar_event": {
+                    "id": f"preference-calendar-{suffix}",
+                    "summary": "Care check-in with Janet Ellis",
+                    "when": "Tomorrow at 10:00 AM",
+                    "description": "Pastoral care conversation.",
+                    "attendees": [{"displayName": "Janet Ellis", "email": "janet.ellis@example.test"}],
+                }
+            },
+            account=account,
+        )
+        meeting_action = assistant_router._prepare_connected_meeting_prep(
+            db,
+            profile,
+            "prepare care check-in",
+            account,
+        )
+        meeting_payload = assistant_router._json_loads(meeting_action.payload_json)
+        meeting_context = meeting_payload.get("review_context") or {}
+        meeting_preferences = meeting_context.get("member_preferences") or []
+        meeting_member_context = meeting_context.get("member_context") or []
+        assert_true(
+            meeting_payload.get("connected_item_id") == calendar_item.id
+            and meeting_context.get("member_name") == "Janet Ellis"
+            and any("phone calls over texts" in (preference.get("text") or "") for preference in meeting_preferences),
+            "Connected meeting prep should attach local member preferences when attendees match Marge people memory.",
+        )
+        assert_true(
+            any(
+                row.get("member_name") == "Janet Ellis"
+                and any("difficult month" in text for text in row.get("active_care") or [])
+                for row in meeting_member_context
+            ),
+            "Connected meeting prep should attach active local care context for matched attendees.",
+        )
+        pre_meeting_context = assistant_router._maybe_answer_ministry_context(
+            db,
+            profile,
+            account,
+            "What should I know before meeting with Janet Ellis?",
+            "what should i know before meeting with janet ellis?",
+            "live",
+        )
+        assert_true(
+            pre_meeting_context
+            and pre_meeting_context.intent == "person_context_lookup"
+            and "Synced calendar" in pre_meeting_context.reply
+            and "Care check-in with Janet Ellis" in pre_meeting_context.reply
+            and any(action.type == "synced_calendar" for action in pre_meeting_context.actions),
+            "Pre-meeting context questions should combine local people memory with synced calendar context.",
+        )
+    finally:
+        db.close()
+        if account_id is not None:
+            cleanup_account(account_id)
+
+
+def assert_backend_empty_proactive_copy_is_honest() -> None:
+    from app.routers import assistant as assistant_router
+
+    profile = SimpleNamespace(
+        pastor_name="Pastor First Run Smoke",
+        church_name="First Run Smoke Church",
+        role_title="Solo Pastor",
+        congregation_size="85",
+        church_context="Neighborhood church with young families.",
+        faith_tradition="Non-denominational; plain language.",
+        followup_pain="Visitor follow-up can go quiet.",
+        ministry_priorities="Close loops with first-time guests.",
+        support_preferences="Nudge me gently and protect my rest.",
+        tools_in_use="Planning Center, Gmail",
+        communication_style="warm and brief",
+        weekly_rhythm="Thursdays are sermon prep.",
+        guardrails="Ask me before sending anything.",
+    )
+    summary = assistant_router._proactive_summary(profile, [], [], [], [])
+    assert_true(
+        "No urgent people are flagged" not in summary,
+        "Backend proactive summaries should not imply Marge has proven no people need care.",
+    )
+    assert_true(
+        "No current follow-up items are visible in this workspace" in summary
+        and "Thursdays are sermon prep" in summary
+        and "Nudge me gently" in summary,
+        "Backend proactive summaries should be honest about current workspace visibility while preserving saved rhythm and support style.",
+    )
 
 
 def request(method: str, path: str, payload: dict[str, Any] | None = None, token: str | None = None) -> Any:
@@ -135,6 +1175,18 @@ def cleanup_account(account_id: int) -> None:
 
 
 def main() -> None:
+    assert_empty_ai_briefing_prompt_is_honest()
+    assert_missing_name_briefing_fallbacks_are_pastoral()
+    assert_connected_email_fallbacks_are_pastoral()
+    assert_connected_context_missing_payload_copy_is_pastoral()
+    assert_backend_name_fallbacks_do_not_create_unknown_people()
+    assert_calendar_provider_not_ready_prompts_match_setup_state()
+    assert_generic_email_calendar_setup_phrasing_routes_to_connector_setup()
+    assert_seed_context_uses_current_user_for_connector_state()
+    assert_pastoral_reminder_chat_queues_local_action()
+    assert_remembered_member_preferences_save_local_memory()
+    assert_backend_empty_proactive_copy_is_honest()
+
     suffix = int(time.time())
     church_name = f"First Run Smoke Church {suffix}"
     account_id = None
@@ -143,6 +1195,7 @@ def main() -> None:
     terse_answer_account_id = None
     prayer_answer_account_id = None
     care_answer_account_id = None
+    care_connect_account_id = None
     try:
         missing_church_status, missing_church_body = request_status(
             "POST",
@@ -154,12 +1207,33 @@ def main() -> None:
             "church name" in json.dumps(missing_church_body).lower(),
             "Blank church-name signup rejection should explain that church name is required.",
         )
+        missing_email_status, missing_email_body = request_status(
+            "POST",
+            "/assistant/signup",
+            {"pastor_name": "Pastor Missing Email", "church_name": f"Missing Email Smoke Church {suffix}"},
+        )
+        assert_true(missing_email_status == 422, "Signup should reject blank owner email addresses so workspaces are recoverable.")
+        assert_true(
+            "email" in json.dumps(missing_email_body).lower(),
+            "Blank email signup rejection should explain that email is required.",
+        )
+        invalid_email_status, invalid_email_body = request_status(
+            "POST",
+            "/assistant/signup",
+            {"pastor_name": "Pastor Invalid Email", "church_name": f"Invalid Email Smoke Church {suffix}", "email": "not-an-email"},
+        )
+        assert_true(invalid_email_status == 422, "Signup should reject invalid owner email addresses.")
+        assert_true(
+            "valid email" in json.dumps(invalid_email_body).lower(),
+            "Invalid email signup rejection should explain that a valid email is required.",
+        )
 
         identity_answer_signup = request(
             "POST",
             "/assistant/signup",
             {
                 "church_name": f"Identity Answer Smoke Church {suffix}",
+                "email": f"identity-answer-{suffix}@example.test",
             },
         )
         identity_answer_token = identity_answer_signup["token"]
@@ -183,6 +1257,7 @@ def main() -> None:
             {
                 "pastor_name": "Pastor First Run Smoke",
                 "church_name": church_name,
+                "email": f"first-run-smoke-{suffix}@example.test",
             },
         )
         token = signup["token"]
@@ -212,7 +1287,8 @@ def main() -> None:
             "Our church tradition is non-denominational with Baptist roots; avoid insider language with guests.",
             "Our biggest pain is visitor follow-up and prayer follow-up; they fall through the cracks.",
             "My first priority this month is closing loops with first-time guests and private prayer needs.",
-            "Our stack is Planning Center and Gmail.",
+            "Nudge me gently, protect my rest, and surface the people I am most likely to miss.",
+            "Our stack is Planning Center for kids check-in and Gmail.",
             "Keep my drafts warm and brief. Fridays are my day off, Thursdays are sermon prep, hospital visits are Tuesday afternoons, and ask me before sending or changing anything.",
         ]
         turns = []
@@ -279,6 +1355,45 @@ def main() -> None:
                 )
                 partial_prompts_text = " ".join(partial_desk.get("suggested_prompts") or []).lower()
                 assert_true("draft" not in partial_prompts_text and "before noon" not in partial_prompts_text, "Partial first-run prompts should stay focused on context and secure setup.")
+            if index == 4:
+                support_desk = request("GET", "/assistant/desk?mode=auto", token=token)
+                support_question = support_desk.get("interview_question") or {}
+                assert_true(support_question.get("field") == "support_preferences", "After first priority is learned, the next question should ask how to support the pastor personally.")
+                assert_true(
+                    "first-time guests" in (support_question.get("question") or "").lower()
+                    or "private prayer" in (support_question.get("question") or "").lower(),
+                    "The support-style question should be contextual to the pastor's stated first priority.",
+                )
+                missing_support_chat = request(
+                    "POST",
+                    "/assistant/chat",
+                    {"message": "How will you support me?", "mode": "live"},
+                    token,
+                )
+                assert_true(
+                    missing_support_chat.get("intent") == "support_style_guidance",
+                    "Support-style prompts should have a dedicated response before the support preference is saved.",
+                )
+                assert_true(
+                    "how should marge support you personally" in missing_support_chat.get("reply", "").lower(),
+                    "When support style is missing, Marge should ask the pastor the contextual support question instead of guessing.",
+                )
+                assert_true(
+                    any(action.get("type") == "profile_setup" and action.get("id") == "setup-profile-support_preferences" for action in missing_support_chat.get("actions", [])),
+                    "Missing support-style replies should attach the support-preference setup card.",
+                )
+            if index == 5:
+                support_chat = request(
+                    "POST",
+                    "/assistant/chat",
+                    {"message": "How will you support me?", "mode": "live"},
+                    token,
+                )
+                assert_true(support_chat.get("intent") == "support_style_guidance", "Support-style prompts should have a dedicated chat response.")
+                assert_true(
+                    "nudge me gently" in support_chat.get("reply", "").lower(),
+                    "Support-style replies should reflect the pastor's saved personal support preference.",
+                )
         profile = request("GET", "/assistant/profile", token=token)
         briefing = request("GET", "/briefing/today?mode=auto", token=token)
         desk = request("GET", "/assistant/desk?mode=auto", token=token)
@@ -314,6 +1429,15 @@ def main() -> None:
         assert_true(profile.get("completion_percent") == 100, "Profile should be complete after the first-run chat sequence.")
         assert_true("Pastor Pastor" not in briefing.get("greeting", ""), "Briefing greeting should not duplicate the Pastor title when the saved name includes it.")
         assert_true("Pastor First Run Smoke" in briefing.get("greeting", ""), "Briefing greeting should still address the saved workspace pastor by name.")
+        assert_true(
+            "Here are your people for today" not in (briefing.get("greeting") or ""),
+            "Live briefing should not greet a first-run pastor as if real people data is already sorted.",
+        )
+        assert_true(
+            "well-tended" not in (briefing.get("plain_text") or "").lower()
+            and "current workspace" in (briefing.get("plain_text") or "").lower(),
+            "Empty live briefing text should ask for real workspace context instead of claiming the flock is already handled.",
+        )
         assert_true(profile.get("missing_fields") == [], "No required first-run profile fields should remain missing.")
         assert_true(profile.get("role_title") == "Bivocational Solo Pastor", "Natural role wording should preserve bivocational context.")
         assert_true(profile.get("congregation_size") == "85", "Congregation size should be extracted from chat.")
@@ -324,7 +1448,9 @@ def main() -> None:
         assert_true("visitor follow-up" in (profile.get("followup_pain") or "").lower(), "Follow-up burden should be saved.")
         assert_true("prayer follow-up" in (profile.get("followup_pain") or "").lower(), "Natural fall-through-cracks wording should preserve the prayer follow-up burden.")
         assert_true("first-time guests" in (profile.get("ministry_priorities") or "").lower(), "First-run chat should save the pastor's stated first ministry priority.")
-        assert_true(profile.get("tools_in_use") == "Planning Center, Gmail", "Known tools should be extracted.")
+        assert_true("Nudge me gently" in (profile.get("support_preferences") or ""), "First-run chat should save the pastor's personal support style.")
+        assert_true("protect my rest" in (profile.get("support_preferences") or ""), "Support preferences should preserve rest/protection context.")
+        assert_true(profile.get("tools_in_use") == "Planning Center, Gmail/Google Workspace", "Known tools should be extracted even when the pastor mentions Planning Center check-in.")
         assert_true(profile.get("communication_style") == "warm and brief", "Drafting voice should be saved.")
         assert_true("Fridays are my day off" in (profile.get("weekly_rhythm") or ""), "Weekly rhythm should preserve day-off context.")
         assert_true("Thursdays are sermon prep" in (profile.get("weekly_rhythm") or ""), "Weekly rhythm should be saved before setup actions are prepared.")
@@ -375,13 +1501,61 @@ def main() -> None:
             any(action.get("type") == "integration_setup" for action in secure_connections.get("actions", [])),
             "Secure-connection explanation should attach connector setup cards when tools are known.",
         )
+        secret_chat = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Should I paste my Gmail password or API key here?", "mode": "live"},
+            token,
+        )
+        secret_chat_reply = secret_chat.get("reply", "")
+        assert_true(
+            secret_chat.get("intent") == "secure_connections_explained",
+            "Secret-pasting questions should route to secure connector guidance.",
+        )
+        assert_true(
+            "Do not paste" in secret_chat_reply and "API keys" in secret_chat_reply,
+            "Secret-pasting guidance should explicitly reject API keys and passwords in chat.",
+        )
+        assert_true(
+            "encrypted credential form" in secret_chat_reply,
+            "Secret-pasting guidance should direct API-key connectors to encrypted credential setup.",
+        )
 
         proactive_summary = desk.get("proactive_summary", "")
         assert_true("log the first real visitor" in proactive_summary.lower(), "Proactive first-run summary should name the concrete next ministry setup action.")
+        assert_true("visitor follow-up" in proactive_summary.lower(), "Proactive first-run summary should explain the next setup step from the pastor's follow-up pain.")
+        assert_true("first-time guests" in proactive_summary.lower(), "Proactive first-run summary should carry the pastor's stated first ministry priority.")
+        assert_true("nudge me gently" in proactive_summary.lower(), "Proactive first-run summary should remember the pastor's support style.")
+        assert_true("protect my rest" in proactive_summary.lower(), "Proactive first-run summary should preserve the pastor's rest/protection preference.")
         assert_true("seed marge" not in proactive_summary.lower(), "Proactive first-run summary should not expose internal setup labels.")
         completed_setup_prompts = " ".join(desk.get("suggested_prompts") or []).lower()
         assert_true("log the first real visitor" in completed_setup_prompts, "Complete but empty first-run prompts should point to the first real ministry record.")
         assert_true("draft" not in completed_setup_prompts and "before noon" not in completed_setup_prompts, "Complete but empty first-run prompts should not imply drafts or priorities already exist.")
+
+        off_script_empty_chat = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Can you be my secretary?", "mode": "live"},
+            token,
+        )
+        off_script_reply = off_script_empty_chat.get("reply", "")
+        off_script_prompts = " ".join(off_script_empty_chat.get("suggested_prompts") or []).lower()
+        assert_true(
+            off_script_empty_chat.get("intent") == "general_assistant",
+            "Off-script first-run chat should still use the assistant fallback.",
+        )
+        assert_true(
+            "first real visitor" in off_script_reply.lower(),
+            "Off-script first-run fallback should stay anchored to the concrete first-record setup step.",
+        )
+        assert_true(
+            any(action.get("type") == "data_seed" and action.get("form") == "visitor" for action in off_script_empty_chat.get("actions", [])),
+            "Off-script first-run fallback should attach the active first-record setup card.",
+        )
+        assert_true(
+            "log the first real visitor" in off_script_prompts,
+            "Off-script first-run fallback should keep setup-aware prompt chips visible.",
+        )
 
         setup_reason = request(
             "POST",
@@ -401,6 +1575,10 @@ def main() -> None:
         assert_true(
             "approval" in setup_reason_reply.lower(),
             "Setup-reason reply should keep approval boundaries visible.",
+        )
+        assert_true(
+            "placeholder" not in setup_reason_reply.lower(),
+            "Setup-reason replies should not describe the live pastor experience as placeholder work.",
         )
         assert_true(
             any(action.get("type") == "data_seed" and action.get("form") == "visitor" for action in setup_reason.get("actions", [])),
@@ -511,20 +1689,108 @@ def main() -> None:
             {"message": "What should I connect first?", "mode": "live"},
             token,
         )
+        connect_first_reply = connect_first.get("reply", "")
         assert_true(connect_first.get("intent") == "integration_setup_started", "A generic connect-first prompt should start secure setup, not only list connector status.")
         assert_true(connect_first.get("actions"), "Connect-first chat should return a setup action card.")
         assert_true(
             connect_first["actions"][0].get("provider") == "google_workspace",
             "Connect-first chat should choose the first relevant saved tool and preserve its provider key.",
         )
+        assert_true(
+            "gmail" in connect_first_reply.lower() and "visitor follow-up" in connect_first_reply.lower(),
+            "Connect-first chat should explain the recommendation from saved tools and the pastor's follow-up burden.",
+        )
+        assert_true(
+            "planning center" in connect_first_reply.lower(),
+            "Connect-first chat should name the next saved connector after the first recommendation.",
+        )
+        assert_true(
+            "secure" in connect_first_reply.lower() and ("tokens" in connect_first_reply.lower() or "secrets" in connect_first_reply.lower()),
+            "Connect-first chat should keep secure setup boundaries visible.",
+        )
+        assert_true(
+            "Sync Google Workspace." not in (connect_first.get("suggested_prompts") or []),
+            "Connect-first chat should not suggest syncing before connector setup and credential checks are complete.",
+        )
+
+        start_google_setup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Start Google Workspace setup.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            start_google_setup.get("intent") == "integration_setup_started",
+            "Suggested start-setup prompts should route to secure connector setup.",
+        )
+        assert_true(
+            any(action.get("provider") == "google_workspace" for action in start_google_setup.get("actions", [])),
+            "Start Google Workspace setup should attach the Google setup card.",
+        )
+        assert_true(
+            "Sync Google Workspace." not in (start_google_setup.get("suggested_prompts") or []),
+            "Start-setup prompts should not suggest syncing before setup and credential checks.",
+        )
+        care_connect_signup = request(
+            "POST",
+            "/assistant/signup",
+            {
+                "pastor_name": "Pastor Care Connector",
+                "church_name": f"Care Connector Smoke Church {suffix}",
+                "email": f"care-connector-{suffix}@example.test",
+                "role_title": "Solo pastor",
+                "congregation_size": "90",
+                "church_context": "Older congregation with active hospital visits and a small care team.",
+                "faith_tradition": "Methodist; keep language gentle and plain.",
+                "followup_pain": "Hospital and grief follow-up fall through the cracks after the first visit.",
+                "ministry_priorities": "Keep active care cases visible until someone checks back in.",
+                "support_preferences": "Surface the people I am likely to miss without overwhelming me.",
+                "tools_in_use": "Planning Center and Gmail",
+                "communication_style": "warm and brief",
+                "weekly_rhythm": "Hospital visits Tuesday afternoons; sermon prep Thursday mornings.",
+                "guardrails": "Ask me before sending or sharing medical details.",
+            },
+        )
+        care_connect_token = care_connect_signup["token"]
+        care_connect_account_id = care_connect_signup["account_id"]
+        care_connect_first = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Which tool should I connect first?", "mode": "live"},
+            care_connect_token,
+        )
+        care_connect_reply = care_connect_first.get("reply", "")
+        assert_true(
+            care_connect_first.get("intent") == "integration_setup_started",
+            "People/care-heavy connect-first prompts should still start secure setup.",
+        )
+        assert_true(care_connect_first.get("actions"), "People/care-heavy connect-first prompts should attach setup.")
+        assert_true(
+            care_connect_first["actions"][0].get("provider") == "planning_center",
+            "People/care-heavy connect-first prompts should prioritize the saved people system over Gmail.",
+        )
+        assert_true(
+            "hospital" in care_connect_reply.lower() or "grief" in care_connect_reply.lower(),
+            "People/care-heavy connect-first prompts should explain the recommendation from the saved care burden.",
+        )
+        assert_true(
+            "google workspace" in care_connect_reply.lower(),
+            "People/care-heavy connect-first prompts should still name the next saved communication connector.",
+        )
 
         assert_true(first_week_action is not None, "Profile completion should queue a first-week launch plan.")
+        first_week_description = first_week_action.get("description") or ""
+        assert_true(
+            "Nudge me gently" in first_week_description and "protect my rest" in first_week_description,
+            "First-week plan review card should carry the pastor's saved support style.",
+        )
         first_week_plan = (first_week_action.get("payload") or {}).get("plan") or []
         first_week_text = json.dumps(first_week_plan)
         first_week_titles = {item.get("title") for item in first_week_plan}
         assert_true("Log the first real visitor" in first_week_titles, "First-week plan should start with the first relevant real ministry record.")
         assert_true("Connect Google Workspace" in first_week_titles, "First-week plan should include Google Workspace setup.")
         assert_true("Connect Planning Center" in first_week_titles, "First-week plan should include Planning Center setup.")
+        assert_true("Nudge me gently" in first_week_text, "First-week plan should include the pastor's support style as a plan item.")
         assert_true("Thursdays are sermon prep" in first_week_text, "First-week plan should preserve the pastor's weekly rhythm.")
         assert_true("non-denominational" in first_week_text.lower(), "First-week plan should preserve church voice and tradition.")
         assert_true("Ask me before sending" in first_week_text, "First-week plan should preserve explicit approval guardrails.")
@@ -591,6 +1857,10 @@ def main() -> None:
             "no church tools yet" in open_integrations_reply.lower(),
             "Open integrations should show no verified church tools before secure setup/check.",
         )
+        assert_true(
+            "Sync the connected tools." not in (open_integrations.get("suggested_prompts") or []),
+            "Open integrations should not suggest syncing connected tools before setup and credential checks.",
+        )
 
         connected_tools_sync = request(
             "POST",
@@ -625,6 +1895,328 @@ def main() -> None:
             "Connected-tools sync precheck must not default to syncing Google when no church tool is verified.",
         )
 
+        pre_setup_provider_syncs = [
+            ("Sync Planning Center.", "planning_center", "sync_planning_center_not_connected"),
+            ("Sync Google Workspace.", "google_workspace", "sync_google_workspace_not_connected"),
+            ("Sync Rock RMS.", "rock", "sync_rock_rms_not_connected"),
+        ]
+        for sync_message, expected_provider, expected_intent in pre_setup_provider_syncs:
+            provider_sync = request(
+                "POST",
+                "/assistant/chat",
+                {"message": sync_message, "mode": "live"},
+                token,
+            )
+            provider_sync_reply = provider_sync.get("reply", "")
+            provider_sync_prompts = " ".join(provider_sync.get("suggested_prompts") or []).lower()
+            assert_true(
+                provider_sync.get("intent") == expected_intent,
+                f"{sync_message} before setup should stop at a credential-aware setup route.",
+            )
+            assert_true(
+                "secure setup" in provider_sync_reply.lower()
+                and "no-sync credential check" in provider_sync_reply.lower(),
+                f"{sync_message} before setup should explain setup/check/sync order.",
+            )
+            assert_true(
+                any(action.get("provider") == expected_provider for action in provider_sync.get("actions", [])),
+                f"{sync_message} before setup should attach the requested provider setup/check card.",
+            )
+            assert_true(
+                "sync" not in provider_sync_prompts,
+                f"{sync_message} before setup should not return sync prompt chips.",
+            )
+
+        empty_planning_context = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Show Planning Center context.", "mode": "live"},
+            token,
+        )
+        empty_planning_context_reply = empty_planning_context.get("reply", "")
+        empty_planning_context_providers = {action.get("provider") for action in empty_planning_context.get("actions", [])}
+        empty_planning_context_prompts = empty_planning_context.get("suggested_prompts") or []
+        assert_true(
+            empty_planning_context.get("intent") == "connected_context_lookup",
+            "Empty connected-context lookups should use the connected-context route.",
+        )
+        assert_true(
+            "secure setup" in empty_planning_context_reply.lower() and "no-sync credential check" in empty_planning_context_reply.lower(),
+            "Empty connected-context lookup should explain setup/check/sync order before context exists.",
+        )
+        assert_true(
+            "planning_center" in empty_planning_context_providers,
+            "Empty connected-context lookup should attach the requested provider setup card.",
+        )
+        assert_true(
+            "Sync Planning Center." not in empty_planning_context_prompts and "Sync the connected tools." not in empty_planning_context_prompts,
+            "Empty connected-context lookup should not suggest sync before secure setup and credential checks.",
+        )
+
+        meeting_prep_before_calendar_setup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What meetings need prep?", "mode": "live"},
+            token,
+        )
+        meeting_prep_before_calendar_reply = meeting_prep_before_calendar_setup.get("reply", "")
+        meeting_prep_before_calendar_prompts = meeting_prep_before_calendar_setup.get("suggested_prompts") or []
+        meeting_prep_before_calendar_providers = {
+            action.get("provider") for action in meeting_prep_before_calendar_setup.get("actions", [])
+        }
+        assert_true(
+            meeting_prep_before_calendar_setup.get("intent") == "meeting_prep_lookup",
+            "Meeting-prep lookup before calendar setup should use a credential-aware empty route.",
+        )
+        assert_true(
+            "secure setup" in meeting_prep_before_calendar_reply.lower()
+            and "no-sync credential check" in meeting_prep_before_calendar_reply.lower(),
+            "Meeting-prep empty state should explain setup/check/sync order before calendar context exists.",
+        )
+        assert_true(
+            {"google_workspace", "planning_center"}.issubset(meeting_prep_before_calendar_providers),
+            "Meeting-prep empty state should attach saved calendar setup/check cards.",
+        )
+        assert_true(
+            "Sync the calendar again." not in meeting_prep_before_calendar_prompts,
+            "Meeting-prep empty prompts should not suggest calendar sync before credentials are verified.",
+        )
+        prepare_meeting_before_calendar_setup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Prepare my next meeting.", "mode": "live"},
+            token,
+        )
+        prepare_meeting_before_calendar_reply = prepare_meeting_before_calendar_setup.get("reply", "")
+        prepare_meeting_before_calendar_prompts = prepare_meeting_before_calendar_setup.get("suggested_prompts") or []
+        prepare_meeting_before_calendar_providers = {
+            action.get("provider") for action in prepare_meeting_before_calendar_setup.get("actions", [])
+        }
+        assert_true(
+            prepare_meeting_before_calendar_setup.get("intent") == "meeting_prep_lookup",
+            "Prepare-meeting prompts before calendar setup should reuse the credential-aware empty meeting-prep route.",
+        )
+        assert_true(
+            "secure setup" in prepare_meeting_before_calendar_reply.lower()
+            and "no-sync credential check" in prepare_meeting_before_calendar_reply.lower(),
+            "Prepare-meeting empty state should explain setup/check/sync order before calendar context exists.",
+        )
+        assert_true(
+            {"google_workspace", "planning_center"}.issubset(prepare_meeting_before_calendar_providers),
+            "Prepare-meeting empty state should attach saved calendar setup/check cards.",
+        )
+        assert_true(
+            "Sync the calendar again." not in prepare_meeting_before_calendar_prompts,
+            "Prepare-meeting empty prompts should not suggest calendar sync before credentials are verified.",
+        )
+
+        sync_calendar_before_setup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Sync the calendar.", "mode": "live"},
+            token,
+        )
+        sync_calendar_before_setup_reply = sync_calendar_before_setup.get("reply", "")
+        sync_calendar_before_setup_prompts = " ".join(sync_calendar_before_setup.get("suggested_prompts") or []).lower()
+        sync_calendar_before_setup_providers = {
+            action.get("provider") for action in sync_calendar_before_setup.get("actions", [])
+        }
+        assert_true(
+            sync_calendar_before_setup.get("intent") == "sync_calendar_not_connected",
+            "Explicit calendar sync before setup should stop at a credential-aware setup route.",
+        )
+        assert_true(
+            "secure setup" in sync_calendar_before_setup_reply.lower()
+            and "no-sync credential check" in sync_calendar_before_setup_reply.lower(),
+            "Explicit calendar sync before setup should explain setup/check/sync order.",
+        )
+        assert_true(
+            {"google_workspace", "planning_center"}.issubset(sync_calendar_before_setup_providers),
+            "Explicit calendar sync before setup should attach saved calendar setup/check cards.",
+        )
+        assert_true(
+            "sync" not in sync_calendar_before_setup_prompts,
+            "Explicit calendar sync before setup should not return sync prompt chips.",
+        )
+
+        missing_synced_person_import = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Add Marcus Reed from Planning Center to Marge.", "mode": "live"},
+            token,
+        )
+        missing_synced_person_reply = missing_synced_person_import.get("reply", "")
+        missing_synced_person_prompts = missing_synced_person_import.get("suggested_prompts") or []
+        assert_true(
+            missing_synced_person_import.get("intent") == "connected_person_import_not_found",
+            "Importing a synced person before sync should return a connector-aware not-found response.",
+        )
+        assert_true(
+            "secure setup" in missing_synced_person_reply.lower() and "no-sync credential check" in missing_synced_person_reply.lower(),
+            "Missing synced-person import should explain setup/check/sync order instead of saying to sync first.",
+        )
+        assert_true(
+            any(action.get("provider") == "planning_center" for action in missing_synced_person_import.get("actions", [])),
+            "Missing synced-person import should attach the requested provider setup card.",
+        )
+        assert_true(
+            "Sync Planning Center." not in missing_synced_person_prompts and "Sync Breeze." not in missing_synced_person_prompts,
+            "Missing synced-person import should not suggest provider sync before setup and credential checks.",
+        )
+
+        inbox_before_email_setup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What is in my inbox?", "mode": "live"},
+            token,
+        )
+        inbox_before_email_setup_reply = inbox_before_email_setup.get("reply", "")
+        inbox_before_email_setup_actions = inbox_before_email_setup.get("actions", [])
+        inbox_before_email_setup_providers = {action.get("provider") for action in inbox_before_email_setup_actions}
+        inbox_before_email_setup_prompts = " ".join(inbox_before_email_setup.get("suggested_prompts") or []).lower()
+        assert_true(
+            inbox_before_email_setup.get("intent") == "synced_inbox_empty",
+            "Inbox lookup before mail setup should use a credential-aware empty route.",
+        )
+        assert_true(
+            "no google workspace or microsoft 365 mailbox has completed secure setup" in inbox_before_email_setup_reply.lower(),
+            "Inbox empty state should explain that secure mailbox setup is required before inbox context exists.",
+        )
+        assert_true(
+            "no-sync credential check" in inbox_before_email_setup_reply.lower(),
+            "Inbox empty state should require credential checks before suggesting sync.",
+        )
+        assert_true(
+            {"google_workspace", "microsoft_365"}.issubset(inbox_before_email_setup_providers),
+            "Inbox empty state should attach mail setup/check cards instead of returning no actions.",
+        )
+        assert_true(
+            "sync the inbox" not in inbox_before_email_setup_prompts,
+            "Inbox empty prompts should not suggest syncing before credentials are verified.",
+        )
+
+        sync_inbox_before_email_setup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Sync the inbox.", "mode": "live"},
+            token,
+        )
+        sync_inbox_before_email_setup_reply = sync_inbox_before_email_setup.get("reply", "")
+        sync_inbox_before_email_setup_prompts = " ".join(sync_inbox_before_email_setup.get("suggested_prompts") or []).lower()
+        sync_inbox_before_email_setup_providers = {
+            action.get("provider") for action in sync_inbox_before_email_setup.get("actions", [])
+        }
+        assert_true(
+            sync_inbox_before_email_setup.get("intent") == "sync_mailbox_not_connected",
+            "Explicit inbox sync before setup should stop at a credential-aware setup route.",
+        )
+        assert_true(
+            "secure setup" in sync_inbox_before_email_setup_reply.lower()
+            and "no-sync credential check" in sync_inbox_before_email_setup_reply.lower(),
+            "Explicit inbox sync before setup should explain setup/check/sync order.",
+        )
+        assert_true(
+            {"google_workspace", "microsoft_365"}.issubset(sync_inbox_before_email_setup_providers),
+            "Explicit inbox sync before setup should attach mail setup/check cards.",
+        )
+        assert_true(
+            "sync" not in sync_inbox_before_email_setup_prompts,
+            "Explicit inbox sync before setup should not return sync prompt chips.",
+        )
+
+        queued_replies_before_email_setup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Queue replies for these.", "mode": "live"},
+            token,
+        )
+        queued_replies_before_email_setup_reply = queued_replies_before_email_setup.get("reply", "")
+        queued_replies_before_email_setup_prompts = " ".join(queued_replies_before_email_setup.get("suggested_prompts") or []).lower()
+        queued_replies_before_email_setup_providers = {
+            action.get("provider") for action in queued_replies_before_email_setup.get("actions", [])
+        }
+        assert_true(
+            queued_replies_before_email_setup.get("intent") == "draft_synced_email_replies_empty",
+            "Queued inbox replies before mail setup should use a credential-aware empty route.",
+        )
+        assert_true(
+            "no google workspace or microsoft 365 mailbox has completed secure setup" in queued_replies_before_email_setup_reply.lower(),
+            "Queued inbox replies should explain that no connected mailbox exists yet.",
+        )
+        assert_true(
+            {"google_workspace", "microsoft_365"}.issubset(queued_replies_before_email_setup_providers),
+            "Queued inbox replies should attach mail setup/check cards before any sync is possible.",
+        )
+        assert_true(
+            "sync the inbox" not in queued_replies_before_email_setup_prompts,
+            "Queued inbox reply prompts should not suggest syncing before credentials are verified.",
+        )
+
+        care_visit_before_context = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Where can I fit care follow-up?", "mode": "live"},
+            token,
+        )
+        care_visit_before_context_reply = care_visit_before_context.get("reply", "")
+        assert_true(
+            care_visit_before_context.get("intent") == "care_case_guidance",
+            "Care visit planning before a real care person exists should ask for care context instead of proposing a generic calendar block.",
+        )
+        assert_true(
+            "real person" in care_visit_before_context_reply.lower(),
+            "Care visit planning before real context should require the person or care case first.",
+        )
+        assert_true(
+            "protected ministry work" not in care_visit_before_context_reply.lower(),
+            "Care visit planning before real context should not fall back to a generic protected-work block.",
+        )
+        assert_true(
+            any(action.get("type") == "data_seed" for action in care_visit_before_context.get("actions", [])),
+            "Care visit planning before real context should keep the first-record setup card attached.",
+        )
+
+        absence_before_attendance_setup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Who has been absent?", "mode": "live"},
+            token,
+        )
+        absence_before_attendance_reply = absence_before_attendance_setup.get("reply", "")
+        absence_before_attendance_prompts = absence_before_attendance_setup.get("suggested_prompts") or []
+        assert_true(
+            absence_before_attendance_setup.get("intent") == "absence_context_lookup",
+            "Absence lookup before attendance setup should use a credential-aware empty route.",
+        )
+        assert_true(
+            "secure setup" in absence_before_attendance_reply.lower()
+            and "no-sync credential check" in absence_before_attendance_reply.lower(),
+            "Absence empty state should explain setup/check/sync order before attendance context exists.",
+        )
+        assert_true(
+            any(action.get("provider") == "rock" for action in absence_before_attendance_setup.get("actions", [])),
+            "Absence empty state should attach the Rock RMS setup/check card.",
+        )
+        assert_true(
+            "Sync Rock RMS." not in absence_before_attendance_prompts,
+            "Absence empty prompts should not suggest Rock sync before credentials are verified.",
+        )
+
+        absence_drafts_before_attendance_setup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Draft absence check-ins.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            absence_drafts_before_attendance_setup.get("intent") == "absence_drafts_empty",
+            "Absence drafts before attendance setup should use a credential-aware empty route.",
+        )
+        assert_true(
+            "Sync Rock RMS." not in (absence_drafts_before_attendance_setup.get("suggested_prompts") or []),
+            "Absence draft empty prompts should not suggest Rock sync before credentials are verified.",
+        )
+
         actions_before_calendar_help = request("GET", "/assistant/actions?status=all&limit=100", token=token)
         calendar_details_no_provider = request(
             "POST",
@@ -643,6 +2235,11 @@ def main() -> None:
             "YYYY-MM-DD" in calendar_details_no_provider_reply and "start time" in calendar_details_no_provider_reply.lower(),
             "Calendar details help should explain the required date and start-time fields.",
         )
+        calendar_details_no_provider_text = json.dumps(calendar_details_no_provider).lower()
+        assert_true(
+            "marcus" not in calendar_details_no_provider_text and "example.test" not in calendar_details_no_provider_text,
+            "Calendar details help should not teach first-run pastors with fake person names or test email addresses.",
+        )
         assert_true(
             "Google Workspace or Microsoft 365" in calendar_details_no_provider_reply,
             "Calendar details help should name the supported calendar write providers when none is connected.",
@@ -654,6 +2251,11 @@ def main() -> None:
         assert_true(
             {"google_workspace", "microsoft_365"}.issubset(calendar_details_no_provider_providers),
             "Calendar details help should attach Google Workspace and Microsoft 365 setup/check cards when no write provider is connected.",
+        )
+        assert_true(
+            any("Connect Google Workspace" in prompt for prompt in (calendar_details_no_provider.get("suggested_prompts") or []))
+            and "Check Google Workspace credentials." not in (calendar_details_no_provider.get("suggested_prompts") or []),
+            "Calendar details help should suggest setup before credential checks when no calendar connector exists.",
         )
         actions_after_calendar_help = request("GET", "/assistant/actions?status=all&limit=100", token=token)
         assert_true(
@@ -688,6 +2290,11 @@ def main() -> None:
         assert_true("connector credentials" in approval_reply.lower(), "Approval rules should mention checked connector credentials.")
         assert_true("writeback policy" in approval_reply.lower(), "Approval rules should mention church writeback policy.")
         assert_true("approve the exact item" in approval_reply.lower(), "Approval rules should preserve per-action pastor approval.")
+        approval_rule_prompts = " ".join(approval_rules.get("suggested_prompts") or []).lower()
+        assert_true(
+            "before noon" not in approval_rule_prompts and "draft" not in approval_rule_prompts,
+            "Approval-rule prompts should stay setup-aware while no real draft work is ready.",
+        )
 
         memory_recap = request(
             "POST",
@@ -702,7 +2309,82 @@ def main() -> None:
         assert_true("visitor follow-up" in memory_reply.lower(), "Ministry recap should include the named follow-up burden.")
         assert_true("first-time guests" in memory_reply.lower(), "Ministry recap should include the pastor's first stated priority.")
         assert_true("Planning Center" in memory_reply and "Gmail" in memory_reply, "Ministry recap should include saved tools.")
+        assert_true("warm and brief" in memory_reply.lower(), "Ministry recap should include the saved drafting voice.")
         assert_true("Thursdays are sermon prep" in memory_reply, "Ministry recap should include weekly rhythm.")
+        assert_true("ask me before" in memory_reply.lower(), "Ministry recap should include saved approval guardrails.")
+
+        learning_gaps = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What else do you need from me?", "mode": "live"},
+            token,
+        )
+        learning_gaps_reply = learning_gaps.get("reply", "")
+        assert_true(
+            learning_gaps.get("intent") == "ministry_learning_gaps",
+            "Completed-profile learning-gap prompts should not fall back to a generic onboarding recap.",
+        )
+        assert_true(
+            "core ministry profile" in learning_gaps_reply.lower()
+            and "one real ministry record" in learning_gaps_reply.lower(),
+            "Learning-gap replies should distinguish learned profile context from the next missing real ministry record.",
+        )
+        assert_true(
+            "setup, no-sync credential check, then sync only when you ask" in learning_gaps_reply,
+            "Learning-gap replies should keep secure tool setup/check/sync order visible.",
+        )
+        assert_true(
+            any(action.get("type") == "data_seed" and action.get("form") == "visitor" for action in learning_gaps.get("actions", [])),
+            "Learning-gap replies should attach the concrete first-real-record setup card.",
+        )
+
+        guardrail_lookup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What are my guardrails?", "mode": "live"},
+            token,
+        )
+        guardrail_lookup_reply = guardrail_lookup.get("reply", "")
+        assert_true(guardrail_lookup.get("intent") == "profile_guardrails_lookup", "Guardrail lookup should answer from the saved ministry profile.")
+        assert_true("Ask me before sending" in guardrail_lookup_reply, "Guardrail lookup should include the pastor's saved guardrail.")
+        assert_true("checked credentials" in guardrail_lookup_reply and "writeback policy" in guardrail_lookup_reply, "Guardrail lookup should preserve external-write safety boundaries.")
+
+        drafting_voice_lookup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "How should you sound when drafting?", "mode": "live"},
+            token,
+        )
+        drafting_voice_reply = drafting_voice_lookup.get("reply", "")
+        assert_true(drafting_voice_lookup.get("intent") == "profile_drafting_voice_lookup", "Drafting-voice lookup should answer from the saved ministry profile.")
+        assert_true("warm and brief" in drafting_voice_reply.lower(), "Drafting-voice lookup should include the saved communication style.")
+        assert_true("non-denominational" in drafting_voice_reply.lower(), "Drafting-voice lookup should include the saved church voice/tradition.")
+
+        rhythm_lookup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What rhythm should you protect?", "mode": "live"},
+            token,
+        )
+        rhythm_reply = rhythm_lookup.get("reply", "")
+        assert_true(rhythm_lookup.get("intent") == "profile_weekly_rhythm_lookup", "Weekly-rhythm lookup should answer from the saved ministry profile.")
+        assert_true("Thursdays are sermon prep" in rhythm_reply, "Weekly-rhythm lookup should include the saved rhythm.")
+        assert_true("external calendar" in rhythm_reply.lower() and "approval" in rhythm_reply.lower(), "Weekly-rhythm lookup should keep calendar write boundaries visible.")
+
+        tools_lookup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What tools do you remember we use?", "mode": "live"},
+            token,
+        )
+        tools_reply = tools_lookup.get("reply", "")
+        assert_true(tools_lookup.get("intent") == "profile_tools_lookup", "Tools lookup should answer from the saved ministry profile.")
+        assert_true("Planning Center" in tools_reply and "Gmail" in tools_reply, "Tools lookup should include saved church tools.")
+        assert_true("no-sync credential check" in tools_reply and "sync only when you ask" in tools_reply, "Tools lookup should keep secure setup/check/sync order visible.")
+        assert_true(
+            any(action.get("type") in {"integration_setup", "integration_check"} for action in tools_lookup.get("actions", [])),
+            "Tools lookup should attach relevant connector setup/check cards.",
+        )
 
         church_recap = request(
             "POST",
@@ -745,6 +2427,91 @@ def main() -> None:
             any(action.get("type") == "data_seed" and action.get("form") == "visitor" for action in broad_help.get("actions", [])),
             "Broad help should return the concrete first-record setup card while the workspace is still empty.",
         )
+        weekly_help = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "How will you help me this week?", "mode": "live"},
+            token,
+        )
+        weekly_help_reply = weekly_help.get("reply", "")
+        assert_true(
+            weekly_help.get("intent") == "ministry_operating_plan",
+            "Natural weekly help questions should use the saved ministry operating plan.",
+        )
+        assert_true(
+            "visitor follow-up" in weekly_help_reply.lower() and "first-time guests" in weekly_help_reply.lower(),
+            "Weekly help should stay anchored in the pastor's follow-up burden and first priority.",
+        )
+        profile_recap = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Open the ministry profile.", "mode": "live"},
+            token,
+        )
+        profile_recap_prompts = profile_recap.get("suggested_prompts") or []
+        assert_true(
+            profile_recap.get("intent") == "onboarding",
+            "Suggested ministry-profile prompts should route to the profile recap branch.",
+        )
+        assert_true(
+            "I have the core ministry profile" in profile_recap.get("reply", ""),
+            "Ministry-profile recap should acknowledge the saved profile instead of asking a generic setup question.",
+        )
+        assert_true(
+            "Open the ministry profile." not in profile_recap_prompts,
+            "Ministry-profile recap should not suggest the same prompt again.",
+        )
+        assert_true(
+            {"What do you know about my church?", "How will you use this context?"}.issubset(set(profile_recap_prompts)),
+            "Ministry-profile recap should suggest useful follow-up questions.",
+        )
+
+        pastoral_pressure = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "I am overwhelmed by all the follow-up today.", "mode": "live"},
+            token,
+        )
+        pastoral_pressure_reply = pastoral_pressure.get("reply", "")
+        assert_true(
+            pastoral_pressure.get("intent") == "pastor_support",
+            "Pastoral pressure prompts should use the saved support style instead of generic chat.",
+        )
+        assert_true(
+            "Nudge me gently" in pastoral_pressure_reply and "protect my rest" in pastoral_pressure_reply,
+            "Pastoral pressure replies should preserve the pastor's saved support preference.",
+        )
+        assert_true(
+            "Fridays are my day off" in pastoral_pressure_reply or "Thursdays are sermon prep" in pastoral_pressure_reply,
+            "Pastoral pressure replies should keep the saved weekly rhythm in view.",
+        )
+        assert_true(
+            any(action.get("type") == "data_seed" and action.get("form") == "visitor" for action in pastoral_pressure.get("actions", [])),
+            "Pastoral pressure replies should attach the smallest concrete next setup item while the workspace is still empty.",
+        )
+        plate_support = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What can you take off my plate today?", "mode": "live"},
+            token,
+        )
+        plate_support_reply = plate_support.get("reply", "")
+        assert_true(
+            plate_support.get("intent") == "pastor_support",
+            "Take-off-my-plate prompts should route to pastoral support instead of generic chat.",
+        )
+        assert_true(
+            "Nudge me gently" in plate_support_reply and "protect my rest" in plate_support_reply,
+            "Take-off-my-plate replies should preserve the pastor's saved support style.",
+        )
+        assert_true(
+            "approval" in plate_support_reply.lower() and "draft" in plate_support_reply.lower(),
+            "Take-off-my-plate replies should explain reviewable delegation instead of implying autonomous sends.",
+        )
+        assert_true(
+            any(action.get("type") == "data_seed" and action.get("form") == "visitor" for action in plate_support.get("actions", [])),
+            "Take-off-my-plate replies should attach the smallest concrete next setup item while the workspace is still empty.",
+        )
 
         attention_seed = request(
             "POST",
@@ -783,6 +2550,47 @@ def main() -> None:
             any(action.get("form") == "visitor" for action in draft_seed.get("actions", [])),
             "The draft data-seed card should route to the visitor form.",
         )
+        missing_draft_approval = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Approve the welcome draft.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            missing_draft_approval.get("intent") == "assistant_action_not_found",
+            "Approval commands should not fall back to setup items when the named draft does not exist yet.",
+        )
+        assert_true(
+            "real visitor" in missing_draft_approval.get("reply", "").lower(),
+            "Missing-draft approval should point back to first real context instead of approving the wrong setup item.",
+        )
+        assert_true(
+            any(action.get("form") == "visitor" for action in missing_draft_approval.get("actions", [])),
+            "Missing-draft approval should attach the first real visitor setup card.",
+        )
+        empty_approval_seed = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What should I approve first?", "mode": "live"},
+            token,
+        )
+        assert_true(
+            empty_approval_seed.get("intent") == "approval_queue_lookup",
+            "Empty approval questions should still use the approval lookup path.",
+        )
+        assert_true(
+            "real visitor" in empty_approval_seed.get("reply", "").lower(),
+            "An empty first-run approval queue should point back to the first real visitor instead of generic draft work.",
+        )
+        assert_true(
+            any(action.get("form") == "visitor" for action in empty_approval_seed.get("actions", [])),
+            "Empty approval guidance should attach the first real visitor setup card.",
+        )
+        empty_approval_prompts = " ".join(empty_approval_seed.get("suggested_prompts") or []).lower()
+        assert_true(
+            "before noon" not in empty_approval_prompts and "draft" not in empty_approval_prompts,
+            "Empty approval guidance prompts should not imply placeholder operational work is ready.",
+        )
         empty_morning_briefing = request(
             "POST",
             "/assistant/chat",
@@ -794,6 +2602,14 @@ def main() -> None:
         assert_true(
             "first real ministry record" in empty_morning_reply.lower() and "Log the first real visitor" in empty_morning_reply,
             "Empty live morning briefings should ask for the first real record instead of pretending the desk is clear.",
+        )
+        assert_true(
+            "nudge me gently" in empty_morning_reply.lower() and "protect my rest" in empty_morning_reply.lower(),
+            "Empty live morning briefings should reflect the pastor's saved support style.",
+        )
+        assert_true(
+            "placeholder" not in empty_morning_reply.lower(),
+            "Empty live morning briefings should avoid prototype/placeholder wording.",
         )
         assert_true(
             any(action.get("type") == "data_seed" and action.get("form") == "visitor" for action in empty_morning_briefing.get("actions", [])),
@@ -891,6 +2707,43 @@ def main() -> None:
             "welcome draft" in (calendar_after_first_visitor[0].get("detail") or "").lower(),
             "The visitor calendar suggestion should explain the concrete welcome-draft follow-up.",
         )
+        off_script_with_person = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Can you be my secretary?", "mode": "live"},
+            token,
+        )
+        assert_true(
+            off_script_with_person.get("intent") == "general_assistant",
+            "Off-script chat with real ministry context should still use the assistant fallback.",
+        )
+        assert_true(
+            "Talia Brooks" in off_script_with_person.get("reply", ""),
+            "Off-script fallback should lead with real people once Marge has ministry context.",
+        )
+        assert_true(
+            any(action.get("title") == "Talia Brooks" for action in off_script_with_person.get("actions", [])),
+            "Off-script fallback should return the real visitor card before connector setup cards.",
+        )
+        connector_setup_reason = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Why is this the next step?", "mode": "live"},
+            token,
+        )
+        connector_setup_reply = connector_setup_reason.get("reply", "")
+        assert_true(
+            connector_setup_reason.get("intent") == "setup_step_reason",
+            "After the first real record, setup-reason prompts should explain the next connector step.",
+        )
+        assert_true(
+            "secure setup" in connector_setup_reply.lower() and "real ministry context" in connector_setup_reply.lower(),
+            "Connector setup reasons should explain how saved tools lead to real ministry context.",
+        )
+        assert_true(
+            "placeholder" not in connector_setup_reply.lower(),
+            "Connector setup reasons should not describe the pastor experience as placeholder guidance.",
+        )
         scheduling_reply = request(
             "POST",
             "/assistant/chat",
@@ -973,6 +2826,31 @@ def main() -> None:
             talia_after_review and talia_after_review.get("status") == "pending",
             "Asking what to review first must leave the visitor welcome draft pending.",
         )
+        wrong_named_approval = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Approve the Marcus welcome draft.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            wrong_named_approval.get("intent") == "assistant_action_not_found",
+            "Named approval commands should not approve a different pending draft when the named person does not match.",
+        )
+        first_visitor_actions_after_wrong_approval = request("GET", "/assistant/actions?status=all&limit=80", token=token)
+        talia_after_wrong_approval = next(
+            (
+                action
+                for action in first_visitor_actions_after_wrong_approval
+                if action.get("action_type") == "email_draft"
+                and action.get("related_type") == "visitor"
+                and "Talia Brooks" in (action.get("description") or "")
+            ),
+            None,
+        )
+        assert_true(
+            talia_after_wrong_approval and talia_after_wrong_approval.get("status") == "pending",
+            "A mismatched approval command must leave the actual visitor welcome draft pending.",
+        )
         approve_first_draft = request(
             "POST",
             "/assistant/chat",
@@ -1037,7 +2915,16 @@ def main() -> None:
             generic_person_add.get("intent") == "person_capture_guidance",
             "Generic add-person prompts should explain what to capture instead of creating a placeholder person.",
         )
-        assert_true("real name first" in generic_person_add.get("reply", "").lower(), "Person capture guidance should require a real name.")
+        generic_person_reply = generic_person_add.get("reply", "")
+        assert_true("real name first" in generic_person_reply.lower(), "Person capture guidance should require a real name.")
+        assert_true(
+            "ruth carter" not in generic_person_reply.lower() and "example.test" not in generic_person_reply.lower(),
+            "Person capture guidance should not teach live pastors with fake names or test email addresses.",
+        )
+        assert_true(
+            "placeholder" not in generic_person_reply.lower(),
+            "Person capture guidance should avoid prototype/placeholder wording.",
+        )
         add_unknown_person = request(
             "POST",
             "/assistant/chat",
@@ -1157,6 +3044,11 @@ def main() -> None:
         )
         assert_true(unnamed_visitor.get("intent") == "visitor_missing_name", "No-name visitor updates should ask for a name instead of saving a placeholder.")
         assert_true(not unnamed_visitor.get("saved"), "No-name visitor updates should not persist placeholder visitors.")
+        unnamed_visitor_reply = unnamed_visitor.get("reply", "")
+        assert_true(
+            "naomi grace" not in unnamed_visitor_reply.lower() and "example.test" not in unnamed_visitor_reply.lower(),
+            "No-name visitor guidance should not use fake people or test emails.",
+        )
         visitors_after_unnamed = request("GET", "/visitors/?limit=30", token=token)
         assert_true(
             not any(visitor.get("full_name") == "Guest Guest" for visitor in visitors_after_unnamed),
@@ -1192,6 +3084,24 @@ def main() -> None:
         )
         assert_true(legacy_chat_visitor.get("action") == "visitor_logged", "Legacy /chat/ should use connected assistant visitor logging.")
         assert_true(legacy_chat_visitor.get("saved"), "Legacy /chat/ visitor updates should persist.")
+        legacy_chat_history = request("GET", "/assistant/chat/history?limit=20", token=token)
+        assert_true(
+            any(
+                history_item.get("role") == "user"
+                and "naomi grace" in (history_item.get("content") or "").lower()
+                for history_item in legacy_chat_history
+            ),
+            "Legacy /chat/ should persist the pastor turn into connected assistant chat history.",
+        )
+        assert_true(
+            any(
+                history_item.get("role") == "assistant"
+                and history_item.get("intent") == "visitor_logged"
+                and history_item.get("saved")
+                for history_item in legacy_chat_history
+            ),
+            "Legacy /chat/ should persist the connected assistant reply metadata.",
+        )
         legacy_visitors = request("GET", "/visitors/?limit=30", token=token)
         assert_true(
             any(visitor.get("full_name") == "Naomi Grace" for visitor in legacy_visitors),
@@ -1410,6 +3320,150 @@ def main() -> None:
             any(action.get("type") == "calendar_block" and "Janet Ellis" in (action.get("title") or "") for action in visit_plan.get("actions", [])),
             "Visit planning should return a visible calendar-block action for the named person.",
         )
+        pastoral_reminder = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Remind me to call Janet Ellis tomorrow.", "mode": "live"},
+            token,
+        )
+        reminder_reply = pastoral_reminder.get("reply", "")
+        assert_true(
+            pastoral_reminder.get("intent") == "pastoral_reminder_queued",
+            "Natural reminder prompts should queue a local pastoral reminder instead of falling through.",
+        )
+        assert_true(
+            pastoral_reminder.get("saved") and "Janet Ellis" in reminder_reply and "tomorrow" in reminder_reply.lower(),
+            "Pastoral reminder chat should link the known person and preserve timing language.",
+        )
+        assert_true(
+            "Nothing was sent, synced, or written" in reminder_reply,
+            "Pastoral reminder chat should preserve the no-external-write boundary.",
+        )
+        assert_true(
+            any(action.get("type") == "pastoral_reminder" and "call Janet Ellis" in (action.get("detail") or "") for action in pastoral_reminder.get("actions", [])),
+            "Pastoral reminder chat should return a visible reminder action card.",
+        )
+        reminder_actions = request("GET", "/assistant/actions?status=pending&limit=80", token=token)
+        janet_reminder = next(
+            (
+                action
+                for action in reminder_actions
+                if action.get("action_type") == "pastoral_reminder"
+                and action.get("related_type") == "member"
+                and not action.get("external_provider")
+                and ((action.get("payload") or {}).get("reminder") or {}).get("person_name") == "Janet Ellis"
+            ),
+            None,
+        )
+        assert_true(
+            janet_reminder is not None,
+            "Pastoral reminder actions should stay local, pending, and linked to the resolved member.",
+        )
+        reminder_lookup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What reminders do I have?", "mode": "live"},
+            token,
+        )
+        assert_true(
+            reminder_lookup.get("intent") == "pastoral_reminder_lookup"
+            and "call Janet Ellis" in reminder_lookup.get("reply", "")
+            and "local Marge memory" in reminder_lookup.get("reply", "")
+            and any(action.get("type") == "pastoral_reminder" for action in reminder_lookup.get("actions", [])),
+            "Reminder lookup chat should return pending local reminders instead of generic approval copy.",
+        )
+        completed_reminder = request("POST", f"/assistant/actions/{janet_reminder['id']}/execute", token=token)
+        completed_payload = completed_reminder.get("payload") or {}
+        assert_true(
+            completed_reminder.get("status") == "executed"
+            and completed_reminder.get("action_type") == "pastoral_reminder"
+            and ((completed_payload.get("execution") or {}).get("kind") == "pastoral_reminder_completed"),
+            "The Mark done API path should complete a pending local pastoral reminder without a separate approval.",
+        )
+        second_reminder = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Remind me to text Janet Ellis next week.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            second_reminder.get("intent") == "pastoral_reminder_queued",
+            "A second reminder should be queued so chat completion can target a pending local item.",
+        )
+        mark_reminder_done = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Mark Janet reminder done.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            mark_reminder_done.get("intent") == "assistant_action_executed"
+            and "Marked done" in mark_reminder_done.get("reply", "")
+            and any(
+                action.get("type") == "pastoral_reminder" and action.get("subtitle") == "executed"
+                for action in mark_reminder_done.get("actions", [])
+            ),
+            "Natural reminder completion chat should mark the local pastoral reminder done instead of asking for approval.",
+        )
+        cancel_reminder = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Remind me to check on Janet Ellis in two weeks.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            cancel_reminder.get("intent") == "pastoral_reminder_queued",
+            "A reminder should be queued so natural cancel phrasing can target it.",
+        )
+        reschedule_reminder_chat = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Move Janet reminder to Friday.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            reschedule_reminder_chat.get("intent") == "pastoral_reminder_rescheduled"
+            and "Friday" in reschedule_reminder_chat.get("reply", "")
+            and "Nothing was sent, synced, or written externally" in reschedule_reminder_chat.get("reply", "")
+            and any(
+                action.get("type") == "pastoral_reminder"
+                and action.get("subtitle") == "pending"
+                and "Timing: Friday" in (action.get("detail") or "")
+                for action in reschedule_reminder_chat.get("actions", [])
+            ),
+            "Natural reminder reschedule chat should update local reminder timing without external writes.",
+        )
+        snooze_reminder_chat = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Snooze it in two weeks.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            snooze_reminder_chat.get("intent") == "pastoral_reminder_rescheduled"
+            and "in two weeks" in snooze_reminder_chat.get("reply", "")
+            and any(
+                action.get("type") == "pastoral_reminder"
+                and "Timing: in two weeks" in (action.get("detail") or "")
+                for action in snooze_reminder_chat.get("actions", [])
+            ),
+            "Generic reminder snooze chat should update local reminder timing.",
+        )
+        cancel_reminder_chat = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Cancel Janet reminder.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            cancel_reminder_chat.get("intent") == "assistant_action_skipped"
+            and "Skipped" in cancel_reminder_chat.get("reply", "")
+            and any(
+                action.get("type") == "pastoral_reminder" and action.get("subtitle") == "skipped"
+                for action in cancel_reminder_chat.get("actions", [])
+            ),
+            "Natural reminder cancel chat should skip the matching local pastoral reminder.",
+        )
         generic_visit_plan = request(
             "POST",
             "/assistant/chat",
@@ -1439,9 +3493,14 @@ def main() -> None:
         assert_true(defer_triage.get("intent") == "defer_triage", "Suggested deferral prompts should triage work instead of falling through.")
         assert_true("next week" in defer_reply.lower(), "Deferral triage should answer what can wait until next week.")
         assert_true("approval" in defer_reply.lower(), "Deferral triage should preserve external action approval boundaries.")
+        assert_true("nudge me gently" in defer_reply.lower(), "Deferral triage should preserve the pastor's support style.")
         assert_true(
             any(name in defer_reply for name in ["Janet Ellis", "Ruth Carter", "Talia Brooks", "Naomi Grace"]),
             "Deferral triage should stay grounded in real people or queued review items.",
+        )
+        assert_true(
+            "admin cleanup" not in defer_reply.lower(),
+            "Deferral triage should not fall back to generic admin-cleanup language.",
         )
         assert_true(defer_triage.get("actions"), "Deferral triage should return visible work that should not be deferred.")
         next_action = request(
@@ -1456,6 +3515,7 @@ def main() -> None:
             any(name in next_action_reply for name in ["Janet Ellis", "Ruth Carter", "Talia Brooks", "Naomi Grace", "Review Visitor welcome"]),
             "Next-action reply should stay grounded in real people or queued review work.",
         )
+        assert_true("nudge me gently" in next_action_reply.lower(), "Next-action reply should preserve the pastor's support style.")
         assert_true(next_action.get("actions"), "Next-action reply should attach the concrete work card.")
         morning_briefing = request(
             "POST",
@@ -1469,8 +3529,27 @@ def main() -> None:
             any(name in morning_reply for name in ["Janet Ellis", "Talia Brooks", "Naomi Grace", "Review Visitor welcome"]),
             "Morning briefing should stay grounded in real people or queued review work.",
         )
+        assert_true("nudge me gently" in morning_reply.lower(), "Populated morning briefing should preserve the pastor's support style.")
         assert_true("approval" in morning_reply.lower(), "Morning briefing should keep approval boundaries visible.")
         assert_true(morning_briefing.get("actions"), "Morning briefing should attach concrete desk or review cards.")
+        staff_meeting_briefing = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What needs my attention before staff meeting?", "mode": "live"},
+            token,
+        )
+        staff_meeting_reply = staff_meeting_briefing.get("reply", "")
+        assert_true(
+            staff_meeting_briefing.get("intent") == "morning_briefing",
+            "Staff-meeting attention prompts should return the concrete morning briefing.",
+        )
+        assert_true(
+            any(name in staff_meeting_reply for name in ["Janet Ellis", "Talia Brooks", "Naomi Grace", "Review Visitor welcome"]),
+            "Staff-meeting briefing should stay grounded in real people or queued review work.",
+        )
+        assert_true("approval" in staff_meeting_reply.lower(), "Staff-meeting briefing should keep approval boundaries visible.")
+        assert_true("nudge me gently" in staff_meeting_reply.lower(), "Staff-meeting briefing should preserve the pastor's support style.")
+        assert_true(staff_meeting_briefing.get("actions"), "Staff-meeting briefing should attach concrete desk or review cards.")
         contact_log = request(
             "POST",
             "/assistant/chat",
@@ -1483,6 +3562,97 @@ def main() -> None:
             "Janet Ellis" in " ".join(contact_log.get("suggested_prompts") or []),
             "Contact-log follow-up suggestions should keep the member name visible.",
         )
+        assert_true(
+            "local reminder" in contact_log.get("reply", "").lower()
+            and "Remind me to check on Janet Ellis next week." in (contact_log.get("suggested_prompts") or []),
+            "Contact-log chat should proactively suggest a local next-check-in reminder.",
+        )
+        last_visit_lookup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "When did I last visit Janet Ellis?", "mode": "live"},
+            token,
+        )
+        assert_true(
+            last_visit_lookup.get("intent") == "person_context_lookup"
+            and "Active care" in last_visit_lookup.get("reply", "")
+            and "last contact" in last_visit_lookup.get("reply", "")
+            and "Log that I visited Janet Ellis today" in last_visit_lookup.get("reply", ""),
+            "Last-visit chat should answer from pastoral memory instead of generic calendar planning.",
+        )
+        check_next_lookup = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Who should I check on next?", "mode": "live"},
+            token,
+        )
+        assert_true(
+            check_next_lookup.get("intent") == "next_action"
+            and "Janet Ellis" in check_next_lookup.get("reply", "")
+            and any(action.get("title") == "Janet Ellis" for action in check_next_lookup.get("actions", [])),
+            "Who-to-check-on chat should route to next-action triage from ministry context.",
+        )
+        assert_true(
+            "Draft a care follow-up for Janet Ellis." in (check_next_lookup.get("suggested_prompts") or [])
+            and "Remind me to check on Janet Ellis next week." in (check_next_lookup.get("suggested_prompts") or []),
+            "Who-to-check-on route prompts should carry the named person into the next action.",
+        )
+        remembered_preference = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Remember that Janet Ellis prefers phone calls over texts.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            remembered_preference.get("intent") == "member_note_logged" and remembered_preference.get("saved"),
+            "Remember-that preference prompts should save local member memory through the chat route.",
+        )
+        assert_true(
+            "Janet Ellis" in remembered_preference.get("reply", ""),
+            "Remembered preference replies should name the resolved local person.",
+        )
+        assert_true(
+            any(action.get("type") == "member_note" and action.get("source") == "member_note" for action in remembered_preference.get("actions", [])),
+            "Remembered preferences should return a visible member-note card.",
+        )
+        preference_context = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "What do you know about Janet Ellis?", "mode": "live"},
+            token,
+        )
+        assert_true(
+            preference_context.get("intent") == "person_context_lookup"
+            and "Preferences to respect" in preference_context.get("reply", "")
+            and "phone calls over texts" in preference_context.get("reply", ""),
+            "Person context lookup should retrieve remembered preferences distinctly.",
+        )
+        preference_draft = request(
+            "POST",
+            "/assistant/chat",
+            {"message": "Draft a care follow-up for Janet Ellis.", "mode": "live"},
+            token,
+        )
+        assert_true(
+            preference_draft.get("intent") == "draft_care_followup_queued",
+            "Care follow-up drafts should still queue after a remembered preference is saved.",
+        )
+        preference_draft_card = (preference_draft.get("actions") or [{}])[0]
+        preference_draft_action_id = int(str(preference_draft_card.get("id", "action-0")).replace("action-", ""))
+        preference_draft_action = request("GET", f"/assistant/actions/{preference_draft_action_id}", token=token)
+        preference_draft_payload = preference_draft_action.get("payload") or {}
+        preference_draft_context = preference_draft_payload.get("draft_context") or {}
+        preference_draft_preferences = preference_draft_context.get("member_preferences") or []
+        preference_draft_body = ((preference_draft_payload.get("email") or {}).get("body") or "").lower()
+        assert_true(
+            preference_draft_context.get("member_name") == "Janet Ellis"
+            and any("phone calls over texts" in (preference.get("text") or "") for preference in preference_draft_preferences),
+            "Reviewable care drafts should carry remembered member preferences in draft metadata.",
+        )
+        assert_true(
+            "phone calls over texts" not in preference_draft_body,
+            "Remembered preferences should stay out of sendable draft bodies unless the pastor edits them in.",
+        )
 
         command_answer_signup = request(
             "POST",
@@ -1490,6 +3660,7 @@ def main() -> None:
             {
                 "pastor_name": "Pastor Command Answer Smoke",
                 "church_name": f"Command Answer Smoke Church {suffix}",
+                "email": f"command-answer-{suffix}@example.test",
             },
         )
         command_answer_token = command_answer_signup["token"]
@@ -1500,6 +3671,7 @@ def main() -> None:
             "Our church tradition is Methodist, but use plain language with guests.",
             "Visitor follow-up falls through the cracks after Sunday.",
             "Help me close loops with first-time guests before Monday.",
+            "Nudge me gently and surface only what I am likely to miss.",
             "Connect Planning Center and Gmail.",
             "Write in a warm and brief tone.",
             "Protect Fridays as my day off and Thursdays for sermon prep.",
@@ -1514,8 +3686,12 @@ def main() -> None:
             "A 'Help me...' answer to the priority question should save ministry priorities instead of being skipped as a command.",
         )
         assert_true(
-            command_answer_profile.get("tools_in_use") == "Planning Center, Gmail",
+            command_answer_profile.get("tools_in_use") == "Planning Center, Gmail/Google Workspace",
             "A 'Connect Planning Center and Gmail' answer to the tools question should save tools instead of being skipped as a command.",
+        )
+        assert_true(
+            "Nudge me gently" in (command_answer_profile.get("support_preferences") or ""),
+            "A support-style answer should be saved before tool setup starts.",
         )
         assert_true(
             command_answer_profile.get("communication_style") == "warm and brief",
@@ -1532,6 +3708,7 @@ def main() -> None:
             {
                 "pastor_name": "Pastor Terse Answer Smoke",
                 "church_name": f"Terse Answer Smoke Church {suffix}",
+                "email": f"terse-answer-{suffix}@example.test",
             },
         )
         terse_answer_token = terse_answer_signup["token"]
@@ -1543,6 +3720,7 @@ def main() -> None:
             "Baptist roots; avoid insider language.",
             "Visitors and prayer cards.",
             "First-time guests before Monday.",
+            "Nudge me gently.",
             "Planning Center and Gmail.",
             "Warm, brief, pastoral.",
             "Sermon prep Thursdays, Fridays off.",
@@ -1557,7 +3735,8 @@ def main() -> None:
         assert_true("Baptist roots" in (terse_answer_profile.get("faith_tradition") or ""), "Terse church voice should preserve the stated tradition.")
         assert_true("avoid insider language" in (terse_answer_profile.get("faith_tradition") or "").lower(), "Terse church voice should preserve language boundaries.")
         assert_true("first-time guests" in (terse_answer_profile.get("ministry_priorities") or "").lower(), "Terse priority answers should not be mistaken for a fake visitor.")
-        assert_true(terse_answer_profile.get("tools_in_use") == "Planning Center, Gmail", "Terse tool answers should be normalized to known church tools.")
+        assert_true("Nudge me gently" in (terse_answer_profile.get("support_preferences") or ""), "Terse support-style answers should be saved.")
+        assert_true(terse_answer_profile.get("tools_in_use") == "Planning Center, Gmail/Google Workspace", "Terse tool answers should be normalized to known church tools.")
         assert_true(
             terse_answer_profile.get("communication_style") == "warm and brief and pastoral",
             "Terse drafting-voice answers should be normalized from known voice words.",
@@ -1569,12 +3748,14 @@ def main() -> None:
             {
                 "pastor_name": "Pastor Prayer Focus Smoke",
                 "church_name": f"Prayer Focus Smoke Church {suffix}",
+                "email": f"prayer-focus-{suffix}@example.test",
                 "role_title": "Solo Pastor",
                 "congregation_size": "45",
                 "church_context": "A small rural church where private prayer needs often come through handwritten cards.",
                 "faith_tradition": "Baptist roots; keep language gentle and discreet.",
                 "followup_pain": "Private prayer requests fall through the cracks after Sunday.",
                 "ministry_priorities": "Close loops with private prayer needs before people feel forgotten.",
+                "support_preferences": "Nudge me gently and help me protect confidential prayer follow-up.",
                 "tools_in_use": "Gmail",
                 "communication_style": "warm, brief, pastoral",
                 "weekly_rhythm": "Sermon prep Thursdays; prayer follow-up on Tuesday afternoons.",
@@ -1725,12 +3906,14 @@ def main() -> None:
             {
                 "pastor_name": "Pastor Care Focus Smoke",
                 "church_name": f"Care Focus Smoke Church {suffix}",
+                "email": f"care-focus-{suffix}@example.test",
                 "role_title": "Solo Pastor",
                 "congregation_size": "70",
                 "church_context": "A small town church with older members and a lot of hospital care.",
                 "faith_tradition": "Methodist; use gentle plain language.",
                 "followup_pain": "Hospital and grief follow-up fall through the cracks after the first visit.",
                 "ministry_priorities": "Keep active hospital and grief care visible until someone checks back in.",
+                "support_preferences": "Surface the care cases I am likely to miss and do not overwhelm me.",
                 "tools_in_use": "Gmail",
                 "communication_style": "warm and brief",
                 "weekly_rhythm": "Hospital visits Tuesday afternoons; sermon prep Thursday mornings.",
@@ -1840,7 +4023,12 @@ def main() -> None:
             care_answer_token,
         )
         assert_true(care_capture_help.get("intent") == "care_case_guidance", "Care capture prompts should stay useful after the first care case exists.")
-        assert_true("latest contact" in care_capture_help.get("reply", "").lower(), "Care capture guidance should ask for latest contact context.")
+        care_capture_reply = care_capture_help.get("reply", "")
+        assert_true("latest contact" in care_capture_reply.lower(), "Care capture guidance should ask for latest contact context.")
+        assert_true(
+            "ruth carter" not in care_capture_reply.lower() and "example.test" not in care_capture_reply.lower(),
+            "Care capture guidance should not rely on fake names or test email addresses.",
+        )
         care_pending = request("GET", "/assistant/actions?status=pending&limit=40", token=care_answer_token)
         assert_true(
             not any(action.get("action_type") == "data_seed" for action in care_pending),
@@ -1859,6 +4047,8 @@ def main() -> None:
             "chat_history_messages_after_clear": len(empty_history),
         }, indent=2))
     finally:
+        if care_connect_account_id is not None:
+            cleanup_account(care_connect_account_id)
         if care_answer_account_id is not None:
             cleanup_account(care_answer_account_id)
         if prayer_answer_account_id is not None:
